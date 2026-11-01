@@ -71,11 +71,14 @@ function setExisting(o: any, fields: Record<string, any>): void {
 }
 
 /** Encrypts one upload in place; returns the image size for the caption tag, if any. */
+/** Encrypted temp file uri -> image size of the original (files encrypted when attached). */
+const sizes = new Map<string, { w: number; h: number } | null>();
+
 async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: number } | null> {
   const d = descriptorOf(u);
   if (!d) throw new Error("unknown upload shape: " + Object.keys(u ?? {}).join(","));
   const name: string = d.filename ?? d.name ?? u.filename ?? "file";
-  if (/\.enc(\.|$)/.test(name) && String(d.uri).includes("/aegires/")) return null; // already ours
+  if (sizes.has(d.uri)) return sizes.get(d.uri) ?? null; // already encrypted when attached
   const mime: string = d.mimeType ?? d.type ?? u.mimeType ?? "";
   const src: string = d.originalUri ?? d.uri;
 
@@ -91,8 +94,15 @@ async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: n
   if (d !== u) setExisting(u, { filename: encName, mimeType: ENC_MIME, isImage: false, isVideo: false, currentSize: enc.length, preCompressionSize: enc.length });
   if (d.uri !== tmp) throw new Error("could not swap upload uri");
   if ((d.filename ?? d.name ?? u.filename) !== encName) throw new Error("could not swap file name");
+  sizes.set(tmp, size);
+  if (sizes.size > 200) sizes.delete(sizes.keys().next().value as string);
   diag.attEncrypted++;
   return size;
+}
+
+/** Encrypts files in place as they are attached (no caption yet). Resolves false on failure. */
+export function encryptAttachments(channelId: string, files: any[]): Promise<boolean> {
+  return encryptOutgoing(channelId, files, []);
 }
 
 /**

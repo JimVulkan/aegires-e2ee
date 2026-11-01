@@ -45,6 +45,10 @@ const nativeModuleProxy = {
     removeFile: async (dir, rel) => { files.delete("/" + dir + "/" + rel); },
   },
 };
+// A module Discord has not initialised yet (Metro registry entry), holding an upload function.
+const lateCalls = [];
+const LateUpload = { uploadFiles: (opts) => { lateCalls.push(opts); return Promise.resolve(); } };
+const modules = { 9001: { isInitialized: false, publicModule: { exports: {} }, factory(_g, _r, _i, _a, module) { module.exports = LateUpload; } } };
 const fakeFetch = async (url) => {
   const b = url.startsWith("file://") ? files.get(url.slice(7)) : remote.get(url);
   if (!b) return { ok: false, status: 404, blob: async () => new Blob([]) };
@@ -77,7 +81,7 @@ const vendetta = {
 };
 
 // ---- load the bundle like a loader would --------------------------------------------------
-const ctx = vm.createContext({ vendetta, console, require, crypto: globalThis.crypto, setTimeout, clearTimeout, nativeModuleProxy, fetch: fakeFetch });
+const ctx = vm.createContext({ vendetta, console, require, crypto: globalThis.crypto, setTimeout, clearTimeout, setInterval, clearInterval, nativeModuleProxy, fetch: fakeFetch, modules });
 const tick = () => new Promise((r) => setTimeout(r, 20));
 const raw = vm.runInContext(`(vendetta => { return ${code} })(vendetta)`, ctx);
 const plugin = raw.default ?? raw;
@@ -199,6 +203,31 @@ console.log("  ok  sendMessage with attachmentsToUpload: files + caption encrypt
 FluxDispatcher.dispatch({ type: "UPLOAD_ATTACHMENT_ADD_FILES", channelId: "123", files: [] });
 assert.equal(dispatched.at(-1).type, "UPLOAD_ATTACHMENT_ADD_FILES", "upload hook present => attach allowed");
 console.log("  ok  attaching files allowed while the upload hook is installed");
+
+// ---- attachments encrypted at attach time --------------------------------------------------
+const picked = { uri: "file:///pics/photo.png", filename: "photo.png", mimeType: "image/png" };
+FluxDispatcher.dispatch({ type: "UPLOAD_ATTACHMENT_ADD_FILES", channelId: "123", files: [picked] });
+assert.equal(dispatched.at(-1).type, "AEGIRES_E2EE_HELD_UPLOAD", "plaintext file never reaches Discord");
+await tick();
+assert.equal(dispatched.at(-1).type, "UPLOAD_ATTACHMENT_ADD_FILES");
+assert.equal(dispatched.at(-1).files[0], picked);
+assert.equal(picked.filename, "photo.enc.png");
+assert.deepEqual(ref.decryptBytes(files.get(picked.uri.slice(7)), key), photo);
+const encUri = picked.uri;
+await Upload.uploadLocalFiles({ channelId: "123", uploads: [{ item: picked }], parsedMessage: { content: "later" } });
+assert.equal(picked.uri, encUri, "already-encrypted file is not encrypted twice");
+assert.equal(ref.decrypt(uploaded.at(-1).parsedMessage.content, key), "[sz:640,480]later");
+console.log("  ok  files are encrypted as soon as they are attached; caption keeps the [sz] tag");
+
+const late = modules[9001];
+late.factory(globalThis, null, null, null, late.publicModule);
+late.isInitialized = true;
+const lateUp = { item: { uri: "file:///pics/photo.png", filename: "photo.png", mimeType: "image/png" } };
+await LateUpload.uploadFiles({ channelId: "123", uploads: [lateUp], parsedMessage: { content: "lazy" } });
+assert.equal(lateCalls.length, 1);
+assert.equal(lateUp.item.filename, "photo.enc.png");
+assert.equal(ref.decrypt(lateCalls[0].parsedMessage.content, key), "[sz:640,480]lazy");
+console.log("  ok  upload module loaded lazily after the plugin is hooked on init");
 
 // ---- attachments: receive -----------------------------------------------------------------
 const cdn = "https://cdn.discordapp.com/attachments/123/555/photo.enc.png?ex=1&is=2&hm=3";

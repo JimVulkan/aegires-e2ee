@@ -14,6 +14,7 @@ import { splitSizeTag } from "../crypto/files.ts";
 import { LOCK, getReceiveKeys, isEncryptionOn } from "../state.ts";
 import { notify } from "../notify.ts";
 import { retryUploadPatch, uploadHooked } from "./upload.ts";
+import { encryptAttachments } from "../outgoing.ts";
 import { diag } from "../diag.ts";
 import { clearMedia, handleAttachments, setDispatcher } from "./media.ts";
 
@@ -69,27 +70,44 @@ function decryptMessage(m: any, fallbackChannelId?: string): void {
   }
 }
 
+let redispatch: ((e: any) => void) | null = null;
+const MARK = "__aegiresEncrypted";
+
 /**
- * Upload-related events: they mean the upload module is now loaded, so try hooking it again.
- * If we still have no upload hook, a file being attached in an encrypted chat is dropped
- * (returns true) so it can never be sent in plaintext.
+ * Files being attached in an encrypted chat are encrypted right away, before any upload code
+ * sees them: the event is held back, every file is replaced by its encrypted copy
+ * ("x.enc.ext", Aegires format) and the event is dispatched again. So whatever upload path
+ * this Discord version uses, only ciphertext can leave the phone. Returns true to drop the
+ * original event.
  */
-function blockUnsafeUpload(event: any, type: string): boolean {
-  if (!/UPLOAD/.test(type)) return false;
+function interceptAttach(event: any, type: string): boolean {
+  if (!/UPLOAD|ATTACH/.test(type)) return false;
   if (!diag.uploadEvents.includes(type) && diag.uploadEvents.length < 10) diag.uploadEvents.push(type);
-  if (uploadHooked()) return false;
   retryUploadPatch();
-  if (uploadHooked() || !/ADD/.test(type)) return false;
+  if (!/ADD/.test(type) || event[MARK]) return false;
   const channelId = String(event.channelId ?? event.channel_id ?? selectedChannelId() ?? "");
   if (!channelId || !isEncryptionOn(channelId)) return false;
-  notify("This Discord version's upload code was not found yet, so attachments cannot be encrypted. The file was not attached. Turn encryption off for this chat to send it unencrypted, and report the Diagnostics output.");
+
+  const files = [event.files, event.uploads, event.items, event.attachments].find((x) => Array.isArray(x) && x.length);
+  if (!files) {
+    if (uploadHooked()) return false; // the upload hook will encrypt them at send time
+    notify("Unknown attachment format, so it cannot be encrypted - file not attached. Turn encryption off for this chat to send it unencrypted, and report the Diagnostics output.");
+    return true;
+  }
+  if (!storage.attachments) {
+    notify("Encrypted attachments are turned off in the plugin settings - file not attached so nothing is sent unencrypted.");
+    return true;
+  }
+  encryptAttachments(channelId, files).then((ok) => {
+    if (ok && redispatch) redispatch({ ...event, [MARK]: true });
+  });
   return true;
 }
 
 function handleEvent(event: any): boolean {
   diag.events++;
   if (!event || typeof event !== "object") return false;
-  if (blockUnsafeUpload(event, String(event.type))) return true;
+  if (interceptAttach(event, String(event.type))) return true;
   if (!event.message && !event.messages) return false;
   // Any event that carries message(s) is processed, whatever its name, so a renamed event
   // type in a new Discord version cannot silently disable decryption.
@@ -111,10 +129,11 @@ export function installReceivePatch(): () => void {
   const flux = findFlux();
   noteFound("FluxDispatcher", flux);
   if (!flux || typeof flux.dispatch !== "function") throw new Error("FluxDispatcher.dispatch not found");
-  setDispatcher((e) => flux.dispatch(e));
+  redispatch = (e) => flux.dispatch(e);
+  setDispatcher(redispatch);
   const unpatch = before("dispatch", flux, (args) => {
     try {
-      if (handleEvent(args[0])) return [{ type: "AEGIRES_E2EE_BLOCKED_UPLOAD" }];
+      if (handleEvent(args[0])) return [{ type: "AEGIRES_E2EE_HELD_UPLOAD" }];
     } catch (e) {
       // Never let a bug here break Discord's own event handling.
       console.log("[aegires-e2ee] receive error", e);
@@ -123,6 +142,7 @@ export function installReceivePatch(): () => void {
   return () => {
     unpatch();
     setDispatcher(null);
+    redispatch = null;
     clearMedia();
     encryptedIds.clear();
   };
