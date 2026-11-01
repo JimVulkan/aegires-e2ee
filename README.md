@@ -107,3 +107,7 @@ The build writes `index.js` and `manifest.json` to `dist/`. Host those two files
 - Made by **Dark** ([system32crowdstrikewin11](https://github.com/system32crowdstrikewin11)).
 - Leverages the encryption feature of the [Aegires](https://github.com/Curione23/Aegires) Android client by [Curione23](https://github.com/Curione23). Full credit for the original client and its encryption goes to them.
 
+
+## License
+
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). You may use, modify and fork this project for noncommercial purposes. Forks must keep the notice in [NOTICE](NOTICE), which credits this repo. Contributions are welcome and are accepted under the same license.
