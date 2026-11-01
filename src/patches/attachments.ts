@@ -317,6 +317,61 @@ function installTagPatch(): () => void {
 }
 
 // ---------------------------------------------------------------- entry
+// ---------------------------------------------------------------- SAFE MODE (images broken)
+// Flip to true once image decrypt/encrypt works again (everything above is the real code).
+const IMAGES_WORKING = false;
+
+const PLACEHOLDER_MARK = "\u{1F512} Encrypted attachment";
+
+/** Adds a visible note to messages that carry encrypted attachments we cannot show yet. */
+function addPlaceholder(m: any): void {
+  if (!m || !Array.isArray(m.attachments)) return;
+  const names: string[] = [];
+  for (const a of m.attachments) {
+    if (a && isEncryptedFileName(a.filename)) names.push(String(a.filename));
+  }
+  if (!names.length) return;
+  if (typeof m.content === "string" && looksEncrypted(m.content)) return; // text not decrypted; leave it alone
+  const text = typeof m.content === "string" ? m.content : "";
+  if (text.indexOf(PLACEHOLDER_MARK) !== -1) return; // already added
+  const note = `${PLACEHOLDER_MARK}: cannot decrypt images - image decryption is currently broken`;
+  m.content = text ? `${text}\n${note}` : note;
+  if (m.referenced_message) addPlaceholder(m.referenced_message);
+}
+
+function installPlaceholderPatch(): () => void {
+  const FluxDispatcher = findFlux();
+  if (!FluxDispatcher) throw new Error("FluxDispatcher not found");
+  return before("dispatch", FluxDispatcher, (args: any[]) => {
+    try {
+      const e = args[0];
+      if (!e || typeof e !== "object") return;
+      if (e.message) addPlaceholder(e.message);
+      if (Array.isArray(e.messages)) {
+        for (const m of e.messages) Array.isArray(m) ? m.forEach(addPlaceholder) : addPlaceholder(m);
+      }
+    } catch (err) {
+      log("placeholder error", err);
+    }
+  });
+}
+
+/** While image encryption is broken: in encrypted chats, cancel uploads instead of sending plaintext. */
+function installUploadGuard(): () => void {
+  const mod = findFns("uploadLocalFiles");
+  if (!mod) throw new Error("upload hook not found - uploads cannot be blocked in encrypted chats");
+  return instead("uploadLocalFiles", mod, (args: any[], orig: (...a: any[]) => any) => {
+    const opts = args[0];
+    let channelId: string | undefined = opts?.channelId ?? opts?.channel?.id;
+    if (!channelId) channelId = selectedChannelId() || undefined;
+    if (channelId && isEncryptionOn(channelId)) {
+      showToast("Encrypted images and files are not supported yet - upload cancelled so nothing is sent unencrypted. Turn encryption off for this chat to send it normally.");
+      return Promise.resolve();
+    }
+    return orig(...args);
+  });
+}
+
 export function installAttachmentPatches(): () => void {
   const unpatches: Array<() => void> = [];
   const timers: any[] = [];
@@ -333,10 +388,15 @@ export function installAttachmentPatches(): () => void {
       if (retry > 0) timers.push(setTimeout(() => add(name, f, retry - 1), 5000));
     }
   };
-  add("attachment marker", installMarkPatch);
-  add("attachment renderer", installRenderPatch);
-  add("upload patch", installUploadPatch);
-  add("caption size tag", installTagPatch);
+  if (IMAGES_WORKING) {
+    add("attachment marker", installMarkPatch);
+    add("attachment renderer", installRenderPatch);
+    add("upload patch", installUploadPatch);
+    add("caption size tag", installTagPatch);
+  } else {
+    add("attachment placeholder", installPlaceholderPatch);
+    add("upload guard", installUploadGuard);
+  }
   return () => {
     stopped = true;
     timers.forEach((t) => clearTimeout(t));
