@@ -4,10 +4,11 @@
 // caption are encrypted first (see outgoing.ts), and nothing is sent if that fails.
 //
 // Discord initialises modules lazily, so the upload module usually does not exist yet when the
-// plugin loads. We watch module initialisation (patch.ts onModuleInit) and hook it the moment
-// it appears, plus a background retry. Files themselves are already encrypted when attached
+// plugin loads. We retry in the background and whenever an upload-related event shows up
+// (receive.ts). Wrapping Metro's module factories to catch it earlier broke Discord's startup,
+// so don't do that. Files themselves are already encrypted when attached
 // (receive.ts), so this hook mainly takes care of the caption and its "[sz:W,H]" tag.
-import { findFns, instead, noteFound, onModuleInit, selectedChannelId, uploadCandidates } from "../patch.ts";
+import { findFns, instead, noteFound, selectedChannelId, uploadCandidates } from "../patch.ts";
 import { notify } from "../notify.ts";
 import { storage } from "@vendetta/plugin";
 import { isEncryptionOn } from "../state.ts";
@@ -75,27 +76,9 @@ export function retryUploadPatch(): void {
   report();
 }
 
-/** Upload-like function names exported by modules that loaded after the plugin. */
-const late = new Set<string>();
-
 export function installUploadPatch(): () => void {
   active = true;
   retryUploadPatch();
-  undo.push(
-    onModuleInit((ex) => {
-      if (!active) return;
-      for (const c of [ex, ex?.default]) {
-        if (!c || (typeof c !== "object" && typeof c !== "function")) continue;
-        let found = false;
-        for (const n of NAMES) if (typeof c[n] === "function" && !hooked.includes(n)) { hook(c, n); found = true; }
-        if (found) report();
-        if (late.size < 20) {
-          for (const k of Object.keys(c)) if (/upload/i.test(k) && typeof c[k] === "function") late.add(k);
-          if (late.size) diag.installed["late upload candidates"] = Array.from(late).join(",");
-        }
-      }
-    }),
-  );
   // Keep looking for the modules that appear later (each check is a cheap property scan).
   timer = setInterval(() => {
     tries++;
@@ -110,6 +93,5 @@ export function installUploadPatch(): () => void {
     undo = [];
     hooked = [];
     tries = 0;
-    late.clear();
   };
 }

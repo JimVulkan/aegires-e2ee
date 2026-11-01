@@ -143,35 +143,6 @@ export function envSummary(): string {
   return `metro[${keys(vendetta?.metro)}] patcher[${keys(vendetta?.patcher)}] registry=${reg ? n + " mods, " + init + " init" : "NONE"}`;
 }
 
-/**
- * Calls cb(exports) whenever a module that is not initialised yet gets initialised. Discord
- * loads many modules lazily (e.g. the upload code only on first use), so a one-time scan at
- * plugin load cannot find them. We wrap each pending module's factory; Metro reads it at init.
- */
-export function onModuleInit(cb: (exports: any) => void): () => void {
-  const reg = registry();
-  if (!reg) return () => {};
-  const restore: Array<() => void> = [];
-  let ids: string[] = [];
-  try { ids = Object.keys(reg); } catch {}
-  for (const id of ids) {
-    try {
-      const m = reg[id];
-      if (!m || m.isInitialized || typeof m.factory !== "function") continue;
-      const orig = m.factory;
-      const wrapped = function (this: any, ...a: any[]) {
-        const r = orig.apply(this, a);
-        try { cb(m.publicModule?.exports); } catch (e) { log("onModuleInit callback error", e); }
-        return r;
-      };
-      m.factory = wrapped;
-      restore.push(() => { try { if (m.factory === wrapped) m.factory = orig; } catch {} });
-    } catch {}
-  }
-  diag.installed["lazy module watch"] = `${restore.length} pending modules`;
-  return () => restore.forEach((f) => f());
-}
-
 /** Names of exported functions containing "upload" in initialised modules (for Diagnostics). */
 export function uploadCandidates(): string {
   const names = new Set<string>();
