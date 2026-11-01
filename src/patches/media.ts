@@ -9,7 +9,7 @@
 //      of partial update the gateway sends when an embed unfurls).
 import { storage } from "@vendetta/plugin";
 import { decryptBytes } from "../crypto/wire.ts";
-import { MAX_FILE_BYTES, extOf, imageMimeFor, isEncryptedFileName, mimeFor, originalFileName, rawCdnUrl } from "../crypto/files.ts";
+import { MAX_FILE_BYTES, extOf, imageDims, imageMimeFor, isEncryptedFileName, mimeFor, originalFileName, rawCdnUrl } from "../crypto/files.ts";
 import { base64Encode } from "../crypto/base64.ts";
 import { getReceiveKeys } from "../state.ts";
 import { readUri, removeCacheFiles, writeCacheFile } from "../native.ts";
@@ -58,8 +58,8 @@ function apply(a: any, d: Decrypted, size: { w: number; h: number } | null): voi
   a.content_type = d.mime;
   a.size = d.size;
   if (d.mime.startsWith("image/")) {
-    a.width = size?.w ?? d.w ?? a.width ?? 480;
-    a.height = size?.h ?? d.h ?? a.height ?? 360;
+    a.width = d.w ?? size?.w ?? a.width ?? 480;
+    a.height = d.h ?? size?.h ?? a.height ?? 360;
   }
 }
 
@@ -88,7 +88,9 @@ async function decryptOne(a: any, keys: Uint8Array[], size: { w: number; h: numb
     if (!imageMimeFor(name) || plain.length > 2 * 1024 * 1024) throw e;
     uri = `data:${mime};base64,${base64Encode(plain)}`;
   }
-  return { uri, name, mime, size: plain.length, w: size?.w, h: size?.h };
+  // Real pixel size from the file itself; the sender's [sz:W,H] tag is only a fallback.
+  const dims = (imageMimeFor(name) && imageDims(plain)) || size;
+  return { uri, name, mime, size: plain.length, w: dims?.w, h: dims?.h };
 }
 
 export function handleAttachments(m: any, channelId: string | undefined, size: { w: number; h: number } | null): void {

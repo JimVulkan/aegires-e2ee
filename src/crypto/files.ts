@@ -109,3 +109,68 @@ export function imageMimeFor(name: string): string | null {
   const m = MIME[extOf(name)];
   return m && m.startsWith("image/") ? m : null;
 }
+
+// ---------------------------------------------------------------- image dimensions
+
+const u16be = (b: Uint8Array, i: number) => (b[i] << 8) | b[i + 1];
+const u16le = (b: Uint8Array, i: number) => b[i] | (b[i + 1] << 8);
+const u24le = (b: Uint8Array, i: number) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16);
+const u32be = (b: Uint8Array, i: number) => ((b[i] << 24) >>> 0) + ((b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]);
+const ascii = (b: Uint8Array, i: number, n: number) => String.fromCharCode(...Array.from(b.subarray(i, i + n)));
+
+/** EXIF orientation (1-8) from a JPEG APP1 segment, or 1. */
+function exifOrientation(b: Uint8Array, start: number, end: number): number {
+  if (ascii(b, start, 4) !== "Exif") return 1;
+  const t = start + 6; // TIFF header
+  const le = b[t] === 0x49; // "II" little endian, "MM" big endian
+  const r16 = (i: number) => (le ? u16le(b, i) : u16be(b, i));
+  const r32 = (i: number) => (le ? (u16le(b, i) | (u16le(b, i + 2) << 16)) >>> 0 : u32be(b, i));
+  const ifd = t + r32(t + 4);
+  if (ifd + 2 > end) return 1;
+  const n = r16(ifd);
+  for (let k = 0; k < n; k++) {
+    const e = ifd + 2 + k * 12;
+    if (e + 12 > end) break;
+    if (r16(e) === 0x0112) return r16(e + 8);
+  }
+  return 1;
+}
+
+/**
+ * Pixel size of a PNG / JPEG / GIF / WebP / BMP from its header, as displayed (JPEG EXIF
+ * rotation applied). Null if the format is unknown. Used to give decrypted images the right
+ * aspect ratio, since Discord crops images into the box their width/height describe.
+ */
+export function imageDims(b: Uint8Array): { w: number; h: number } | null {
+  try {
+    if (b.length >= 24 && b[0] === 0x89 && ascii(b, 1, 3) === "PNG") return { w: u32be(b, 16), h: u32be(b, 20) };
+    if (b.length >= 10 && ascii(b, 0, 3) === "GIF") return { w: u16le(b, 6), h: u16le(b, 8) };
+    if (b.length >= 26 && ascii(b, 0, 2) === "BM") return { w: Math.abs(u16le(b, 18) | (u16le(b, 20) << 16)), h: Math.abs(u16le(b, 22) | (u16le(b, 24) << 16)) };
+    if (b.length >= 30 && ascii(b, 0, 4) === "RIFF" && ascii(b, 8, 4) === "WEBP") {
+      const kind = ascii(b, 12, 4);
+      if (kind === "VP8X") return { w: 1 + u24le(b, 24), h: 1 + u24le(b, 27) };
+      if (kind === "VP8 ") return { w: u16le(b, 26) & 0x3fff, h: u16le(b, 28) & 0x3fff };
+      if (kind === "VP8L") return { w: 1 + (b[21] | ((b[22] & 0x3f) << 8)), h: 1 + ((b[22] >> 6) | (b[23] << 2) | ((b[24] & 0x0f) << 10)) };
+      return null;
+    }
+    if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+      let orientation = 1;
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) return null;
+        const marker = b[i + 1];
+        if (marker === 0xff) { i++; continue; }
+        const len = u16be(b, i + 2);
+        if (marker === 0xe1) orientation = exifOrientation(b, i + 4, Math.min(b.length, i + 2 + len));
+        // SOF0-SOF15, except DHT (C4), JPG (C8) and DAC (CC)
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+          const h = u16be(b, i + 5);
+          const w = u16be(b, i + 7);
+          return orientation >= 5 && orientation <= 8 ? { w: h, h: w } : { w, h };
+        }
+        i += 2 + len;
+      }
+    }
+  } catch {}
+  return null;
+}
