@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { parseAttachmentUrl, rawCdnUrl, imageMimeFor } from "../src/patches/attachments-util.ts";
+const u = "https://media.discordapp.net/attachments/111/222/photo.enc.png?ex=a&is=b&hm=c&format=webp&width=400&height=300";
+assert.deepEqual(parseAttachmentUrl(u), { channelId: "111", attachmentId: "222", filename: "photo.enc.png" });
+assert.equal(rawCdnUrl(u), "https://cdn.discordapp.com/attachments/111/222/photo.enc.png?ex=a&is=b&hm=c");
+assert.equal(rawCdnUrl("https://cdn.discordapp.com/attachments/1/2/a.enc.png"), "https://cdn.discordapp.com/attachments/1/2/a.enc.png");
+assert.equal(parseAttachmentUrl("https://example.com/x.png"), null);
+assert.equal(imageMimeFor("a.JPG"), "image/jpeg");
+assert.equal(imageMimeFor("a.pdf"), null);
+console.log("attachments: all ok");

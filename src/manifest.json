@@ -1,0 +1,7 @@
+{
+  "name": "Aegires E2EE",
+  "description": "Encrypt and decrypt messages with a shared passphrase, compatible with the Aegires Android client.",
+  "authors": [{ "name": "YOUR NAME HERE" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_lock" }
+}
