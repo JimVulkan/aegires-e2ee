@@ -8,6 +8,7 @@
 // registration is wrapped in try/catch: if it fails the plugin still works via Settings.
 import { registerCommand } from "@vendetta/commands";
 import { notify as showToast } from "./notify.ts";
+import { storage } from "@vendetta/plugin";
 import { getSendKey, isEncryptionOn, setChannelEnabled } from "./state.ts";
 import { runSelfTest } from "./selftest.ts";
 
@@ -49,7 +50,7 @@ export function installCommands(): () => void {
           return showToast("E2EE OFF for this chat");
         }
         if (action === "status") {
-          return showToast(`E2EE ${isEncryptionOn(channelId) ? "ON" : "OFF"} - key ${getSendKey(channelId) ? "set" : "missing"}`);
+          return showToast(`E2EE ${isEncryptionOn(channelId) ? "ON" : "OFF"} - key ${getSendKey(channelId) ? "set" : "missing"} - attachments ${storage.attachments ? "on" : "off"}`);
         }
         if (action === "selftest") {
           showToast("Running self-test...");

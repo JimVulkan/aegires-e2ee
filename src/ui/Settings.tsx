@@ -137,6 +137,7 @@ function SettingsInner() {
 
       <Card title="Behaviour">
         <ToggleRow label="Encrypt outgoing messages by default (in chats without their own on/off setting)" value={!!storage.encryptByDefault} onChange={(v) => { storage.encryptByDefault = v; refresh(); }} />
+        <ToggleRow label="Encrypt and decrypt attachments (images, videos, files). When off, uploads are blocked in encrypted chats" value={!!storage.attachments} onChange={(v) => { storage.attachments = v; refresh(); }} />
         <ToggleRow label="Show a lock icon in front of decrypted messages" value={!!storage.showLock} onChange={(v) => { storage.showLock = v; refresh(); }} />
         <ToggleRow label="Debug logging" value={!!storage.debug} onChange={(v) => { storage.debug = v; refresh(); }} />
       </Card>
@@ -185,32 +186,46 @@ function SettingsInner() {
           }
         />
         {testLines.map((l: string, i: number) => (
-          <Text key={i} style={{ color: l.startsWith("PASS") ? C.text : C.danger, marginTop: 4, fontFamily: "monospace" }}>{l}</Text>
+          <Text key={i} style={{ color: l.startsWith("FAIL") ? C.danger : C.text, marginTop: 4, fontFamily: "monospace" }}>{l}</Text>
         ))}
       </Card>
     </ScrollView>
   );
 }
 
-// If anything in the screen throws, show the error text on screen instead of Discord's
-// "Uh Oh" crash page, so we can see what broke.
+function CrashReport(props: { error: any }) {
+  const e = props.error;
+  const msg = [String(e), String(e?.stack ?? "").slice(0, 1200), reactDiagnostics()].join("\n");
+  return (
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
+      <Text selectable style={{ color: C.danger }}>{msg}</Text>
+    </ScrollView>
+  );
+}
+
+// If anything in the screen throws (now or on a later re-render), show the error text on
+// screen instead of Discord's "Uh Oh" crash page, so we can see what broke.
+const Boundary: any =
+  typeof React.Component === "function"
+    ? class extends React.Component {
+        state = { error: null as any };
+        static getDerivedStateFromError(error: any) {
+          return { error };
+        }
+        componentDidCatch(error: any) {
+          console.log("[aegires-e2ee] settings crashed", error);
+        }
+        render() {
+          return this.state.error ? <CrashReport error={this.state.error} /> : <SettingsInner />;
+        }
+      }
+    : SettingsInner;
+
 export default function Settings() {
   try {
-    return SettingsInner();
-  } catch (e: any) {
-    const msg = String(e) + "\n" + String(e?.stack ?? "").slice(0, 1200) + "\n" + reactDiagnostics();
-    console.log("[aegires-e2ee] settings crashed", msg);
-    try {
-      RN.Alert.alert("Aegires settings crashed", msg);
-    } catch {}
-    try {
-      return (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
-          <Text selectable style={{ color: C.danger }}>{msg}</Text>
-        </ScrollView>
-      );
-    } catch {
-      return null;
-    }
+    return <Boundary />;
+  } catch (e) {
+    try { RN.Alert.alert("Aegires settings crashed", String(e)); } catch {}
+    return null;
   }
 }

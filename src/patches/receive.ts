@@ -1,37 +1,32 @@
-// INCOMING: turn "§<base64>" back into readable text before Discord's UI sees it.
+// INCOMING: turn "§<base64>" back into readable text (and encrypted attachments back into
+// viewable files) before Discord's message store and UI see it.
 //
-// How it works: every message that reaches the app (new message, edit, history load) is
-// announced on Discord's internal event bus, FluxDispatcher, as an event object such as
+// Every message that reaches the app (new message, edit, history load, search, pins) is
+// announced on Discord's internal event bus, FluxDispatcher, as an event such as
 //   { type: "MESSAGE_CREATE", message: {...} }  or  { type: "LOAD_MESSAGES_SUCCESS", messages: [...] }
-// We run `before` dispatch: if a message's content is ciphertext and we hold a key that opens
-// it, we overwrite content with the plaintext IN PLACE. The message store and UI then simply
-// show the plaintext - no UI component needs to be patched, which makes this the sturdiest
-// part of the plugin. Nothing is written back to Discord: the server only ever sees ciphertext.
-//
-// If we cannot decrypt (no key / wrong key) we leave the message untouched. Messages that
-// were already loaded stay as they were; after you change keys, switch channel or restart
-// Discord so history is fetched again.
+// We run `before` dispatch and rewrite the message objects IN PLACE. No UI component is
+// patched (Discord's chat list is rendered natively), so this is the sturdiest hook point.
+// Nothing is written back to Discord: the server only ever sees ciphertext.
 import { before, findFlux, noteFound } from "../patch.ts";
 import { storage } from "@vendetta/plugin";
 import { decryptText, looksEncrypted } from "../crypto/wire.ts";
 import { splitSizeTag } from "../crypto/files.ts";
-import { getReceiveKeys } from "../state.ts";
-import { LOCK } from "./send.ts";
+import { LOCK, getReceiveKeys } from "../state.ts";
 import { diag } from "../diag.ts";
-import { recordSizeHint } from "./attachments.ts";
+import { clearMedia, handleAttachments, setDispatcher } from "./media.ts";
 
-// Event types known to carry messages. If a view in the app still shows ciphertext, turn on
-// "Debug logging" in settings: it logs the type names of events that contain a "§" message
-// which is not in this list, and you just add the name here.
-const MESSAGE_EVENTS = new Set([
-  "MESSAGE_CREATE",
-  "MESSAGE_UPDATE",
-  "LOAD_MESSAGES_SUCCESS",
-  "LOAD_MESSAGES_SUCCESS_CACHED",
-  "LOAD_PINNED_MESSAGES_SUCCESS",
-  "LOAD_RECENT_MENTIONS_SUCCESS",
-  "SEARCH_FINISH",
-]);
+/** Ids of messages we decrypted, so edits of them stay encrypted (see send.ts). */
+const encryptedIds = new Set<string>();
+
+export function wasEncrypted(messageId: string): boolean {
+  return encryptedIds.has(messageId);
+}
+
+function remember(id: unknown): void {
+  if (typeof id !== "string" && typeof id !== "number") return;
+  encryptedIds.add(String(id));
+  if (encryptedIds.size > 5000) encryptedIds.delete(encryptedIds.values().next().value as string);
+}
 
 function tryDecrypt(content: string, channelId: string | undefined): string | null {
   for (const key of getReceiveKeys(channelId)) {
@@ -41,31 +36,35 @@ function tryDecrypt(content: string, channelId: string | undefined): string | nu
   return null;
 }
 
-function decryptMessage(m: any, fallbackChannelId?: string): boolean {
-  if (!m || typeof m !== "object") return false;
+function decryptMessage(m: any, fallbackChannelId?: string): void {
+  if (!m || typeof m !== "object") return;
   const channelId: string | undefined = m.channel_id ?? m.channelId ?? fallbackChannelId;
-  let changed = false;
+  let size: { w: number; h: number } | null = null;
 
   if (looksEncrypted(m.content)) {
     diag.encSeen++;
     const hasKeys = getReceiveKeys(channelId).length > 0;
-    if (!hasKeys) diag.noKey++;
-    const plain = tryDecrypt(m.content, channelId);
+    const plain = hasKeys ? tryDecrypt(m.content, channelId) : null;
     if (plain !== null) {
       diag.decrypted++;
+      remember(m.id);
       // Aegires puts "[sz:W,H]" in front of image captions; hide it from the visible text.
       const sp = splitSizeTag(plain);
-      recordSizeHint(m.id, sp.width, sp.height);
-      const text = sp.text;
-      m.content = (storage.showLock ? LOCK : "") + text;
-      changed = true;
+      if (sp.width && sp.height) size = { w: sp.width, h: sp.height };
+      m.content = sp.text || sp.width === null ? (storage.showLock ? LOCK : "") + sp.text : "";
     } else if (hasKeys) {
       diag.wrongKey++;
+    } else {
+      diag.noKey++;
     }
   }
+  if (Array.isArray(m.attachments) && m.attachments.length) handleAttachments(m, channelId, size);
   // Reply previews ("replying to ...") carry their own copy of the original message.
-  if (m.referenced_message && decryptMessage(m.referenced_message, channelId)) changed = true;
-  return changed;
+  if (m.referenced_message) decryptMessage(m.referenced_message, channelId);
+  // Forwarded messages carry snapshots of the original.
+  if (Array.isArray(m.message_snapshots)) {
+    for (const s of m.message_snapshots) decryptMessage(s?.message, channelId);
+  }
 }
 
 function handleEvent(event: any): void {
@@ -88,10 +87,11 @@ function handleEvent(event: any): void {
 }
 
 export function installReceivePatch(): () => void {
-  const FluxDispatcher = findFlux();
-  noteFound("FluxDispatcher", FluxDispatcher);
-  if (!FluxDispatcher || typeof FluxDispatcher.dispatch !== "function") throw new Error("FluxDispatcher.dispatch not found");
-  return before("dispatch", FluxDispatcher, (args) => {
+  const flux = findFlux();
+  noteFound("FluxDispatcher", flux);
+  if (!flux || typeof flux.dispatch !== "function") throw new Error("FluxDispatcher.dispatch not found");
+  setDispatcher((e) => flux.dispatch(e));
+  const unpatch = before("dispatch", flux, (args) => {
     try {
       handleEvent(args[0]);
     } catch (e) {
@@ -99,4 +99,10 @@ export function installReceivePatch(): () => void {
       console.log("[aegires-e2ee] receive error", e);
     }
   });
+  return () => {
+    unpatch();
+    setDispatcher(null);
+    clearMedia();
+    encryptedIds.clear();
+  };
 }

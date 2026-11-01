@@ -6,7 +6,7 @@ Aegires E2EE is built with Kettu as its primary target. Messages are also design
 
 This plugin leverages the client-side encryption feature of [Aegires](https://github.com/Curione23/Aegires) by Curione23. See [Credits](#credits).
 
-> **Status: experimental.** Text encryption and decryption work. Image support is currently broken. See [Status](#status) and [Known issues](#known-issues).
+> **Status: experimental.** Text encryption and decryption work. Attachment (image, video, file) encryption is newly implemented and still needs on-device testing. See [Status](#status) and [Known issues](#known-issues).
 
 ---
 
@@ -19,6 +19,8 @@ This plugin leverages the client-side encryption feature of [Aegires](https://gi
 - **Encrypt by default** option for chats without their own setting
 - **Lock icon** shown in front of decrypted messages, so you can tell what was encrypted
 - **Password is never stored**. Only the key derived from it is kept
+- **Encrypted attachments** (images, videos, other files) in the Aegires `x.enc.ext` format, with fail-closed uploads
+- **Edits stay encrypted**: editing an encrypted message re-encrypts it even if the chat was switched off
 - **Built-in diagnostics** showing what the plugin hooks are doing and how many messages were encrypted, decrypted or failed
 - **Built-in self-test** that checks Discord has a secure random source and that your phone can decrypt messages made by the real Aegires code
 - **Optional debug logging**
@@ -32,8 +34,8 @@ This plugin leverages the client-side encryption feature of [Aegires](https://gi
 | Per-chat on/off switch | Working |
 | Lock icon on decrypted messages | Working |
 | Diagnostics and self-test | Working |
-| Image encryption / decryption | Broken, in progress |
-| Video and other file encryption | Coming soon |
+| Image encryption / decryption | Implemented, experimental |
+| Video and other file encryption | Implemented, experimental |
 | AES-256 | Coming soon (experimental) |
 
 ## Compatibility
@@ -53,7 +55,7 @@ Everyone in a conversation must use the **same password**. Messages cannot be de
 3. Paste this URL, including the trailing slash:
 
    ```
-   https://system32crowdstrikewin11.github.io/aegires-e2ee/
+   https://jimvulkan.github.io/aegires-e2ee/
    ```
 
 4. Enable **Aegires E2EE**.
@@ -72,15 +74,15 @@ If something isn't working, press **Refresh** in the Diagnostics section after s
 
 ## Known issues
 
-- Image encryption and decryption are currently broken.
-- Video and other file attachments are not supported yet.
+- Attachment support is new and has only been tested against a mock Discord. If uploads are cancelled or images do not show, turn on debug logging and include the Diagnostics output in an issue.
+- Decrypted attachments are cached as plain files in Discord's cache folder until the plugin is unloaded.
+- Attachments larger than 10 MB are not encrypted (the upload is cancelled).
 
 Please open an issue if you find something else. Turn on debug logging and include the Diagnostics output if you can.
 
 ## Roadmap
 
-- Fix image encryption and decryption
-- Video and other file encryption
+- Confirm attachment support on more Discord versions
 - AES-256 as an experimental option
 
 ## Building from source
@@ -88,13 +90,13 @@ Please open an issue if you find something else. Turn on debug logging and inclu
 Requires Node.js and npm.
 
 ```sh
-git clone https://github.com/system32crowdstrikewin11/aegires-e2ee.git
+git clone https://github.com/JimVulkan/aegires-e2ee.git
 cd aegires-e2ee
 npm install
 npm run build
 ```
 
-The build writes `index.js` and `manifest.json` to `dist/`. Host those two files on any static host (for example GitHub Pages) and install the folder's URL in Kettu.
+The build writes `index.js` and `manifest.json` to `dist/`. Every push to `main` is built, tested and published to GitHub Pages by `.github/workflows/pages.yml`.
 
 ## Security notes
 

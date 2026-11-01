@@ -31,7 +31,25 @@ const MessageActions = {
   editMessage: (channelId, id, message) => { edited.push({ channelId, id, content: message.content }); return Promise.resolve("edited"); },
   receiveMessage() {},
 };
-const FluxDispatcher = { dispatch: (event) => { dispatched.push(event); } };
+const FluxDispatcher = { dispatch: (event) => { dispatched.push(event); }, subscribe() {}, unsubscribe() {} };
+const uploaded = [];
+const Upload = { uploadLocalFiles: (opts) => { uploaded.push(opts); return Promise.resolve("uploaded"); } };
+
+// Fake native file system + network, so attachment code can run in node.
+const files = new Map(); // path -> Buffer
+const remote = new Map(); // url -> Buffer
+const nativeModuleProxy = {
+  NativeFileModule: {
+    getConstants: () => ({ CacheDirPath: "/cache" }),
+    writeFile: async (dir, rel, data, enc) => { assert.equal(dir, "cache"); assert.equal(enc, "base64"); files.set("/cache/" + rel, Buffer.from(data, "base64")); },
+    removeFile: async (dir, rel) => { files.delete("/" + dir + "/" + rel); },
+  },
+};
+const fakeFetch = async (url) => {
+  const b = url.startsWith("file://") ? files.get(url.slice(7)) : remote.get(url);
+  if (!b) return { ok: false, status: 404, blob: async () => new Blob([]) };
+  return { ok: true, status: 200, blob: async () => new Blob([b]) };
+};
 
 // Same semantics as Vendetta's patcher: patch in place, return an unpatch function.
 function patcher(kind) {
@@ -48,9 +66,9 @@ function patcher(kind) {
 const vendetta = {
   patcher: { before: patcher("before"), after: patcher("after"), instead: patcher("instead") },
   metro: {
-    findByProps: (...p) => (p.includes("sendMessage") ? MessageActions : undefined),
+    findByProps: (...p) => (p.includes("sendMessage") ? MessageActions : p.includes("uploadLocalFiles") ? Upload : undefined),
     findByStoreName: () => ({ getChannelId: () => "999" }),
-    common: { React: { createElement: () => null, useState: (v) => [v, () => {}] }, ReactNative: new Proxy({}, { get: (_, k) => (k === "Alert" ? { alert: (_t, m) => toasts.push(m) } : "RN") }), FluxDispatcher },
+    common: { React: { createElement: () => null, useState: (v) => [v, () => {}] }, ReactNative: new Proxy({}, { get: (_, k) => (k === "Alert" ? { alert: (_t, m) => toasts.push(m) } : k === "Image" ? { getSize: (_u, ok) => ok(640, 480) } : "RN") }), FluxDispatcher },
   },
   plugin: { storage },
   storage: { useProxy: (s) => s },
@@ -59,7 +77,8 @@ const vendetta = {
 };
 
 // ---- load the bundle like a loader would --------------------------------------------------
-const ctx = vm.createContext({ vendetta, console, require, crypto: globalThis.crypto, setTimeout, clearTimeout });
+const ctx = vm.createContext({ vendetta, console, require, crypto: globalThis.crypto, setTimeout, clearTimeout, nativeModuleProxy, fetch: fakeFetch });
+const tick = () => new Promise((r) => setTimeout(r, 20));
 const raw = vm.runInContext(`(vendetta => { return ${code} })(vendetta)`, ctx);
 const plugin = raw.default ?? raw;
 assert.equal(typeof plugin.onLoad, "function");
@@ -130,6 +149,73 @@ storage.showLock = false;
 FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: { id: "6", channel_id: "123", content: ref.encrypt("no icon", key) } });
 assert.equal(dispatched.at(-1).message.content, "no icon");
 console.log("  ok  lock icon can be turned off");
+
+// ---- edits of encrypted messages stay encrypted ------------------------------------------
+storage.channels["123"] = { enabled: false };
+await MessageActions.editMessage("123", "1", { content: "🔒 changed my mind" });
+assert.equal(ref.decrypt(edited.at(-1).content, key), "changed my mind");
+await MessageActions.editMessage("123", "4", { content: "plain edit" });
+assert.equal(edited.at(-1).content, "plain edit");
+delete storage.channels["123"];
+console.log("  ok  editing a decrypted message re-encrypts it even when the chat is off");
+
+// ---- attachments: upload ------------------------------------------------------------------
+storage.showLock = true;
+const photo = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 13) & 255));
+files.set("/pics/photo.png", photo);
+const up = { item: { uri: "file:///pics/photo.png", filename: "photo.png", mimeType: "image/png" }, filename: "photo.png", mimeType: "image/png", isImage: true, currentSize: photo.length };
+await Upload.uploadLocalFiles({ channelId: "123", uploads: [up], parsedMessage: { content: "look" } });
+const sentUp = uploaded.at(-1);
+assert.ok(sentUp, "upload went through");
+assert.equal(up.item.filename, "photo.enc.png");
+assert.equal(up.item.mimeType, "application/octet-stream");
+assert.equal(up.isImage, false);
+assert.ok(up.item.uri.startsWith("file:///cache/aegires/"));
+const encFile = files.get(up.item.uri.slice(7));
+assert.equal(up.currentSize, encFile.length);
+assert.deepEqual(ref.decryptBytes(encFile, key), photo);
+assert.equal(ref.decrypt(sentUp.parsedMessage.content, key), "[sz:640,480]look");
+console.log("  ok  upload: file encrypted (Aegires framing), renamed x.enc.png, caption gets [sz] tag + encrypted");
+
+storage.attachments = false;
+const nUp = uploaded.length;
+await Upload.uploadLocalFiles({ channelId: "123", uploads: [{ item: { uri: "file:///pics/photo.png", filename: "photo.png" } }], parsedMessage: { content: "" } });
+assert.equal(uploaded.length, nUp, "attachments off + encryption on => upload blocked");
+storage.attachments = true;
+await Upload.uploadLocalFiles({ channelId: "123", uploads: [{ item: { uri: "file:///missing.png", filename: "x.png" } }], parsedMessage: { content: "" } });
+assert.equal(uploaded.length, nUp, "unreadable file => upload blocked");
+storage.channels["777"] = { enabled: false };
+await Upload.uploadLocalFiles({ channelId: "777", uploads: [{ item: { uri: "file:///pics/photo.png", filename: "photo.png" } }], parsedMessage: { content: "hi" } });
+assert.equal(uploaded.at(-1).parsedMessage.content, "hi");
+console.log("  ok  upload fails closed (attachments off / unreadable file); plaintext chats untouched");
+
+// ---- attachments: receive -----------------------------------------------------------------
+const cdn = "https://cdn.discordapp.com/attachments/123/555/photo.enc.png?ex=1&is=2&hm=3";
+remote.set(cdn, encFile);
+const att = { id: "555", filename: "photo.enc.png", url: cdn, proxy_url: cdn.replace("cdn.discordapp.com", "media.discordapp.net") + "&width=100", size: encFile.length };
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", channelId: "123", message: { id: "50", channel_id: "123", content: sentUp.parsedMessage.content, attachments: [att] } });
+assert.equal(dispatched.at(-1).message.content, "🔒 look");
+await tick();
+const upd = dispatched.at(-1);
+assert.equal(upd.type, "MESSAGE_UPDATE");
+assert.equal(upd.message.id, "50");
+const a2 = upd.message.attachments[0];
+assert.ok(a2.url.startsWith("file:///cache/aegires/"), a2.url);
+assert.equal(a2.filename, "photo.png");
+assert.equal(a2.content_type, "image/png");
+assert.equal(a2.width, 640);
+assert.deepEqual(files.get(a2.url.slice(7)), photo);
+FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: { id: "50", channel_id: "123", attachments: [{ ...att }] } });
+assert.equal(dispatched.at(-1).message.attachments[0].url, a2.url, "already-decrypted attachment is rewritten synchronously");
+console.log("  ok  receive: encrypted attachment downloaded, decrypted to a cache file, message updated");
+
+remote.set("https://cdn.discordapp.com/attachments/123/556/x.enc.png", ref.encryptBytes(photo, ref.deriveKey("other")));
+const nd = dispatched.length;
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "51", channel_id: "123", content: "", attachments: [{ id: "556", filename: "x.enc.png", url: "https://cdn.discordapp.com/attachments/123/556/x.enc.png" }] } });
+await tick();
+assert.equal(dispatched.length, nd + 1, "wrong key => no update dispatched");
+assert.equal(dispatched.at(-1).message.attachments[0].filename, "x.enc.png");
+console.log("  ok  receive: wrong-key attachment left untouched");
 
 // ---- command ------------------------------------------------------------------------------
 await commands[0].execute([{ name: "action", value: "off" }], { channel: { id: "123" } });

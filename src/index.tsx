@@ -4,7 +4,7 @@ import { quiet } from "./notify.ts";
 import { initStorage } from "./state.ts";
 import { installSendPatch } from "./patches/send.ts";
 import { installReceivePatch } from "./patches/receive.ts";
-import { installAttachmentPatches } from "./patches/attachments.ts";
+import { installUploadPatch } from "./patches/upload.ts";
 import { installCommands } from "./commands.ts";
 import { hasSecureRandom } from "./crypto/random.ts";
 import Settings from "./ui/Settings.tsx";
@@ -58,7 +58,7 @@ export default {
     }
     safely("send patch", installSendPatch);
     safely("receive patch", installReceivePatch);
-    safely("attachment patches", installAttachmentPatches);
+    safely("upload patch", installUploadPatch);
     safely("commands", installCommands);
   },
   onUnload() {

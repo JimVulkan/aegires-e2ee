@@ -11,6 +11,11 @@ export const diag = {
   wrongKey: 0,
   sendCalls: 0,
   lastSend: "(no send seen yet)",
+  attSeen: 0, // encrypted attachments seen
+  attDecrypted: 0,
+  attFailed: 0,
+  attEncrypted: 0,
+  lastAttError: "",
 };
 
 export function diagLines(): string[] {
@@ -26,5 +31,8 @@ export function diagLines(): string[] {
     `wrong key: ${diag.wrongKey}`,
     `sendMessage calls: ${diag.sendCalls}`,
     `last send: ${diag.lastSend}`,
+    `attachments seen/decrypted/failed: ${diag.attSeen}/${diag.attDecrypted}/${diag.attFailed}`,
+    `attachments encrypted: ${diag.attEncrypted}`,
+    ...(diag.lastAttError ? [`last attachment error: ${diag.lastAttError}`] : []),
   ];
 }

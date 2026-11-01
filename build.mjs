@@ -47,4 +47,5 @@ manifest.hash = createHash("sha256").update(code).digest("hex");
 await mkdir("dist", { recursive: true });
 await writeFile("dist/index.js", code);
 await writeFile("dist/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+await writeFile("dist/.nojekyll", "");
 console.log(`built dist/index.js (${(code.length / 1024).toFixed(0)} KB)${minify ? " [minified]" : ""}`);

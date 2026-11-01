@@ -18,6 +18,7 @@ export function initStorage(): void {
   storage.channels ??= {};
   storage.encryptByDefault ??= false;
   storage.showLock ??= true;
+  storage.attachments ??= true;
   storage.debug ??= false;
 }
 
@@ -94,3 +95,6 @@ export function listChannelConfigs(): Array<{ id: string; hasKey: boolean; enabl
   }
   return out;
 }
+
+/** Shown in front of decrypted messages (if enabled). */
+export const LOCK = "🔒 ";

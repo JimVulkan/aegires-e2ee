@@ -15,20 +15,18 @@ other.
 | `@noble/*` and `fflate` | Bundled into `dist/index.js`. Text encryption and decryption work on device |
 | Discord internals (`sendMessage`, `FluxDispatcher`) | **Working on device.** The Diagnostics panel reports the modules found and the patches installed |
 | Slash command | Registers without errors (Diagnostics shows `hook commands: ok`) |
-| Attachment hooks | Install without errors, but **image encryption and decryption are currently broken** |
-| Video and other file encryption | Not implemented yet |
+| Attachments (images, video, files) | **Implemented, verified with a mock Discord** (`test/e2e-mock.mjs`). Needs on-device testing |
 
 ## Roadmap
 
-- Fix image encryption and decryption
-- Video and other file encryption
+- Confirm attachment support on device across Discord versions
 
 ## Where the fragile parts are
 
 Hardest to easiest:
 
-1. **Attachments** (in progress). Needs hooks into Discord's *upload* pipeline and *media
-   rendering*, native file writing, memory limits, and image sizing. Undocumented and fragile.
+1. **Attachments.** Hooks `uploadLocalFiles` (send) and rewrites attachment URLs to decrypted
+   cache files (receive), using Discord's native file module. Undocumented and fragile.
 2. **Receive path.** Hooks the message event bus. Fragile when Discord renames events.
 3. **Send path.** One function to wrap, but must fail closed.
 4. **Crypto, storage, settings UI, command.** Standard code, tested.
@@ -52,11 +50,13 @@ max plaintext: 1300 characters
 | `src/crypto/wire.ts` | `encryptText` / `decryptText` / `encryptBytes` / `decryptBytes` in the Aegires format |
 | `src/crypto/keys.ts` | Password to key (PBKDF2), hex helpers |
 | `src/crypto/utf8.ts`, `base64.ts`, `random.ts` | Own UTF-8 and base64 codecs (Discord's runtime may lack `TextEncoder`/`atob`); secure random that **throws** rather than falling back to `Math.random` |
-| `src/crypto/files.ts` | Attachment naming and `[sz:W,H]` helpers |
+| `src/crypto/files.ts` | Attachment naming, `[sz:W,H]`, CDN URL and MIME helpers |
 | `src/state.ts` | Settings storage. Stores the *derived key*, never the password. Global key plus optional per-chat key and on/off |
 | `src/patches/send.ts` | Wraps `sendMessage` / `editMessage`; encrypts or blocks (fail closed) |
-| `src/patches/receive.ts` | `before` hook on `FluxDispatcher.dispatch`; decrypts message content in place |
-| `src/patches/attachments.ts` | Attachment patches (in progress; image support currently broken) |
+| `src/patches/receive.ts` | `before` hook on `FluxDispatcher.dispatch`; decrypts message content in place, remembers encrypted ids so edits stay encrypted |
+| `src/patches/media.ts` | Incoming attachments: download, decrypt to Discord's cache dir, rewrite the attachment and dispatch a partial `MESSAGE_UPDATE` |
+| `src/patches/upload.ts` | Outgoing attachments: wraps `uploadLocalFiles`, encrypts files and caption (with `[sz:W,H]`), fails closed |
+| `src/native.ts` | Native file module lookup, reading URIs into bytes, writing cache files |
 | `src/commands.ts` | `/e2ee on|off|status|selftest`. No password option on purpose |
 | `src/ui/Settings.tsx` | Settings screen from plain React Native primitives |
 | `src/selftest*.ts` | On-device check using real Aegires-made vectors |
@@ -67,13 +67,13 @@ max plaintext: 1300 characters
 
 ```sh
 pkg update && pkg install nodejs git
-git clone https://github.com/system32crowdstrikewin11/aegires-e2ee.git
+git clone https://github.com/JimVulkan/aegires-e2ee.git
 cd aegires-e2ee
 npm install
 npm test                 # crypto vs Aegires' Java vectors
 npm run typecheck
 npm run build            # writes dist/index.js and dist/manifest.json
-node test/e2e-mock.mjs   # built plugin vs mock Discord
+npm run test:e2e        # build, then built plugin vs mock Discord
 npm run serve            # serves dist/ on http://localhost:4040
 ```
 
@@ -91,22 +91,14 @@ If that doesn't help, delete `node_modules` and run `npm install` again.
 
 ## Publishing (GitHub Pages)
 
-`dist/` is gitignored on `main`. It is published from a separate `gh-pages` branch that
-contains only the build output:
+`.github/workflows/pages.yml` runs on every push to `main`: typecheck, tests, build, mock e2e
+test, then it publishes `dist/` to GitHub Pages. One-time setup in the GitHub repo:
+**Settings -> Pages -> Build and deployment -> Source: GitHub Actions**. A run can also be
+started by hand from the Actions tab ("Run workflow").
 
-```sh
-npm run build
-cd dist
-git init -b gh-pages          # only needed if dist/.git is missing
-git remote add origin https://github.com/system32crowdstrikewin11/aegires-e2ee.git   # same
-git add -A && git commit -m "deploy"
-git push -f origin gh-pages
-cd ..
-```
-
-Kettu installs from `https://system32crowdstrikewin11.github.io/aegires-e2ee/` (keep the
-trailing slash). GitHub Pages caches for a few minutes, so a new deploy can take a moment to
-show up. Kettu detects updates through the `hash` in `manifest.json`.
+Kettu installs from `https://jimvulkan.github.io/aegires-e2ee/` (keep the trailing slash). GitHub Pages caches
+for a few minutes, so a new deploy can take a moment to show up. Kettu detects updates through
+the `hash` in `manifest.json`.
 
 ## First run on the phone (do in this order)
 

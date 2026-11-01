@@ -3,7 +3,8 @@
 //   1. Does Discord's JS runtime have a secure random source?  (needed to encrypt)
 //   2. Can we decrypt messages that Aegires' real Java code produced? (needed to interoperate)
 import { deriveKey } from "./crypto/keys.ts";
-import { decryptText, encryptText } from "./crypto/wire.ts";
+import { decryptBytes, decryptText, encryptBytes, encryptText } from "./crypto/wire.ts";
+import { fileModule } from "./native.ts";
 import { hasSecureRandom } from "./crypto/random.ts";
 import { VECTORS } from "./selftest-vectors.ts";
 
@@ -31,5 +32,17 @@ export async function runSelfTest(): Promise<{ ok: boolean; lines: string[] }> {
       check(false, v.label + " threw: " + String(e));
     }
   }
+  if (rng) {
+    try {
+      const key = await deriveKey("selftest");
+      const bytes = new Uint8Array(4096).map((_, i) => (i * 31) & 255);
+      const back = decryptBytes(encryptBytes(bytes, key), key);
+      check(!!back && back.length === bytes.length && back.every((v, i) => v === bytes[i]), "attachment encrypt+decrypt round trip");
+    } catch (e) {
+      check(false, "attachment round trip threw: " + String(e));
+    }
+  }
+  // Not fatal: without it attachments cannot be encrypted (uploads are then blocked).
+  lines.push((fileModule() ? "PASS  " : "WARN  ") + "native file module (needed for attachments)");
   return { ok, lines };
 }
