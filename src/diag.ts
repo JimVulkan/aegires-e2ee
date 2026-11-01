@@ -16,6 +16,7 @@ export const diag = {
   attFailed: 0,
   attEncrypted: 0,
   lastAttError: "",
+  uploadEvents: [] as string[], // upload-related Flux event types seen
 };
 
 export function diagLines(): string[] {
@@ -33,6 +34,7 @@ export function diagLines(): string[] {
     `last send: ${diag.lastSend}`,
     `attachments seen/decrypted/failed: ${diag.attSeen}/${diag.attDecrypted}/${diag.attFailed}`,
     `attachments encrypted: ${diag.attEncrypted}`,
+    `upload events: ${diag.uploadEvents.join(", ") || "none"}`,
     ...(diag.lastAttError ? [`last attachment error: ${diag.lastAttError}`] : []),
   ];
 }

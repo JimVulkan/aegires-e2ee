@@ -1,49 +1,24 @@
 // OUTGOING: encrypt the text of a message right before Discord sends it.
 //
 // Discord's mobile app funnels every chat message through
-// MessageActions.sendMessage(channelId, message, ...) (and editMessage for edits). We wrap
-// both: rewrite message.content into "§<base64>" and call the real function, or refuse to
-// call it at all.
-//
-// Rule #1 is FAIL CLOSED: if encryption is switched on for a channel and anything goes wrong
-// (no key, text too long, no secure RNG), we do NOT send. Silently sending plaintext to a
-// channel where the user believes encryption is on would be the worst possible bug.
+// MessageActions.sendMessage(channelId, message, waitForChannelReady?, options?) (and
+// editMessage for edits). We wrap both: rewrite message.content into "§<base64>" and call the
+// real function, or refuse to call it at all. Newer Discord versions also pass attachments to
+// sendMessage (options.attachmentsToUpload); those are encrypted here too.
 import { findFns, instead, noteFound } from "../patch.ts";
 import { notify } from "../notify.ts";
 import { storage } from "@vendetta/plugin";
 import { diag } from "../diag.ts";
-import { MAX_PLAINTEXT_LEN, encryptText, looksEncrypted } from "../crypto/wire.ts";
 import { LOCK, getSendKey, isEncryptionOn } from "../state.ts";
+import { BLOCK, encryptOutgoing, prepare } from "../outgoing.ts";
 import { wasEncrypted } from "./receive.ts";
 
-
-export const BLOCK = Symbol("block");
-
-/**
- * Returns the new content, null to leave the message alone, or BLOCK to cancel the send.
- * `force` encrypts even where encryption is off (used when editing an encrypted message).
- */
-export function prepare(channelId: string, content: unknown, force = false): string | null | typeof BLOCK {
-  if (typeof content !== "string" || content.length === 0) return null;
-  if (looksEncrypted(content)) return null; // already encrypted (e.g. our own re-send)
-  if (!force && !isEncryptionOn(channelId)) return null;
-
-  const key = getSendKey(channelId);
-  if (!key) {
-    notify("E2EE is on for this chat but no key is set - message not sent");
-    return BLOCK;
+/** Attachments riding along with sendMessage, if any. */
+function attachmentsOf(message: any, options: any): any[] {
+  for (const list of [options?.attachmentsToUpload, options?.uploads, message?.attachmentsToUpload]) {
+    if (Array.isArray(list) && list.length) return list;
   }
-  if (content.length > MAX_PLAINTEXT_LEN) {
-    notify(`Too long to encrypt (${content.length}/${MAX_PLAINTEXT_LEN}) - message not sent`);
-    return BLOCK;
-  }
-  try {
-    return encryptText(content, key);
-  } catch (e) {
-    notify("Encryption failed - message not sent");
-    console.log("[aegires-e2ee] encrypt error", e);
-    return BLOCK;
-  }
+  return [];
 }
 
 export function installSendPatch(): () => void {
@@ -54,16 +29,24 @@ export function installSendPatch(): () => void {
 
   undo.push(
     instead("sendMessage", MessageActions, (args, orig) => {
-      // args = [channelId, message, waitForChannelReady?, extra?]
-      const [channelId, message] = args;
+      const [channelId, message, , options] = args;
       diag.sendCalls++;
       if (!message || typeof channelId !== "string") {
         diag.lastSend = "hook hit but unexpected args";
         return orig(...args);
       }
+      const files = attachmentsOf(message, options);
+      if (files.length && isEncryptionOn(channelId)) {
+        diag.lastSend = `with ${files.length} attachment(s) -> encrypting`;
+        if (!storage.attachments) {
+          notify("Encrypted attachments are turned off in the plugin settings - message not sent so nothing goes out unencrypted.");
+          return Promise.resolve();
+        }
+        return encryptOutgoing(channelId, files, [message]).then((ok) => (ok ? orig(...args) : undefined));
+      }
       const out = prepare(channelId, message.content);
       diag.lastSend = `on=${isEncryptionOn(channelId)} key=${!!getSendKey(channelId)} -> ${out === BLOCK ? "BLOCKED" : out === null ? "sent unchanged" : "encrypted"}`;
-      if (storage.debug) console.log("[aegires-e2ee] sendMessage", channelId, diag.lastSend);
+      if (storage.debug) console.log("[aegires-e2ee] sendMessage", channelId, diag.lastSend, options ? Object.keys(options) : "");
       if (out === BLOCK) return Promise.resolve();
       if (out !== null) message.content = out;
       return orig(...args);

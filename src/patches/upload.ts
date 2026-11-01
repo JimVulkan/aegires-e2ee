@@ -1,123 +1,90 @@
-// OUTGOING attachments. Messages with attachments do not go through sendMessage: Discord's
-// uploadLocalFiles({ channelId, uploads, parsedMessage, ... }) uploads the files and posts the
-// caption itself. If encryption is on for the channel we, before calling the original:
-//   - read each file, encrypt it (iv || AES-GCM || tag), write the result to a temp file and
-//     point the upload at it, renamed "x.enc.ext" with a neutral MIME type (Aegires format);
-//   - put "[sz:W,H]" in front of the caption for images, then encrypt the caption.
-// FAIL CLOSED: if any step fails, or the upload object has an unknown shape, nothing is sent.
-import { findFns, instead, noteFound, selectedChannelId } from "../patch.ts";
+// OUTGOING attachments. Depending on the Discord version, files are sent by one of several
+// upload functions ({ channelId, uploads | files, parsedMessage, ... }) instead of sendMessage.
+// We wrap every one we can find; when encryption is on for the channel the files and the
+// caption are encrypted first (see outgoing.ts), and nothing is sent if that fails.
+//
+// Discord's module system initialises modules lazily, so the upload module may not exist yet
+// when the plugin loads. We keep retrying in the background, and receive.ts calls
+// retryUploadPatch() as soon as an upload-related event shows up. Until the hook is in place,
+// receive.ts drops "file added" events in encrypted chats so nothing goes out in plaintext.
+import { findFns, instead, noteFound, selectedChannelId, uploadCandidates } from "../patch.ts";
 import { notify } from "../notify.ts";
 import { storage } from "@vendetta/plugin";
-import { RN } from "../rt.ts";
-import { encryptBytes } from "../crypto/wire.ts";
-import { MAX_FILE_BYTES, encryptedFileName, extOf, imageMimeFor, makeSizeTag } from "../crypto/files.ts";
-import { getSendKey, isEncryptionOn } from "../state.ts";
-import { readUri, tempName, writeCacheFile } from "../native.ts";
+import { isEncryptionOn } from "../state.ts";
+import { encryptOutgoing } from "../outgoing.ts";
 import { diag } from "../diag.ts";
-import { BLOCK, prepare } from "./send.ts";
 
-const ENC_MIME = "application/octet-stream";
+const NAMES = ["uploadLocalFiles", "uploadFiles", "instantBatchUpload"];
 
-function imageSize(uri: string): Promise<{ w: number; h: number } | null> {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(null), 3000);
-    try {
-      RN.Image.getSize(uri, (w: number, h: number) => { clearTimeout(t); resolve({ w, h }); }, () => { clearTimeout(t); resolve(null); });
-    } catch { clearTimeout(t); resolve(null); }
-  });
+let undo: Array<() => void> = [];
+let hooked: string[] = [];
+let timer: any = null;
+let tries = 0;
+let active = false;
+
+export function uploadHooked(): boolean {
+  return hooked.length > 0;
 }
 
-/** The object holding the local file info ({ uri, filename/name, mimeType }) of an upload. */
-function descriptorOf(u: any): any | null {
-  for (const c of [u?.item?.file, u?.item, u?.file, u]) {
-    if (c && typeof c === "object" && typeof c.uri === "string") return c;
-  }
-  return null;
-}
-
-/** Sets only fields the object already has (we must not invent a shape Discord doesn't use). */
-function setExisting(o: any, fields: Record<string, any>): void {
-  for (const [k, v] of Object.entries(fields)) {
-    if (o && k in o) {
-      try { o[k] = v; } catch {}
-    }
-  }
-}
-
-/** Encrypts one upload in place; returns the image size for the caption tag, if any. */
-async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: number } | null> {
-  const d = descriptorOf(u);
-  if (!d) throw new Error("unknown upload shape: " + Object.keys(u ?? {}).join(","));
-  const name: string = d.filename ?? d.name ?? u.filename ?? "file";
-  const mime: string = d.mimeType ?? d.type ?? u.mimeType ?? "";
-  const src: string = d.originalUri ?? d.uri;
-
-  const bytes = await readUri(src, MAX_FILE_BYTES);
-  const size = mime.startsWith("image/") || imageMimeFor(name) ? await imageSize(src) : null;
-
-  const enc = encryptBytes(bytes, key);
-  const tmp = await writeCacheFile(tempName(extOf(name)), enc);
-  const encName = encryptedFileName(name);
-
-  setExisting(d, { uri: tmp, originalUri: tmp, filename: encName, name: encName, mimeType: ENC_MIME, type: ENC_MIME, contentType: ENC_MIME, size: enc.length, fileSize: enc.length });
-  // Never let Discord re-compress the ciphertext as if it were a photo or video.
-  if (d !== u) setExisting(u, { filename: encName, mimeType: ENC_MIME, isImage: false, isVideo: false, currentSize: enc.length, preCompressionSize: enc.length });
-  if (d.uri !== tmp) throw new Error("could not swap upload uri");
-  if ((d.filename ?? d.name ?? u.filename) !== encName) throw new Error("could not swap file name");
-  diag.attEncrypted++;
-  return size;
-}
-
-/** Encrypts the caption (with optional size tag) wherever this Discord version keeps it. */
-function encryptCaption(channelId: string, opts: any, tag: string): void {
-  for (const holder of [opts?.parsedMessage, opts?.message]) {
-    if (!holder || typeof holder.content !== "string") continue;
-    const out = prepare(channelId, tag + holder.content, true);
-    if (out === BLOCK) throw new Error("caption could not be encrypted");
-    if (out !== null) holder.content = out;
-  }
-}
-
-export function installUploadPatch(): () => void {
-  const mod = findFns("uploadLocalFiles");
-  noteFound("upload module", mod);
-  if (!mod) throw new Error("uploadLocalFiles not found - attachments are NOT encrypted");
-
-  return instead("uploadLocalFiles", mod, (args, orig) => {
+function wrap(name: string) {
+  return (args: any[], orig: (...a: any[]) => any) => {
     const opts = args[0];
     const channelId: string = String(opts?.channelId ?? opts?.channel?.id ?? selectedChannelId() ?? "");
+    if (storage.debug) console.log("[aegires-e2ee] " + name, channelId, Object.keys(opts ?? {}));
     if (!channelId || !isEncryptionOn(channelId)) return orig(...args);
 
     if (!storage.attachments) {
       notify("Encrypted attachments are turned off in the plugin settings - upload cancelled so nothing is sent unencrypted.");
       return Promise.resolve();
     }
-    const key = getSendKey(channelId);
-    if (!key) {
-      notify("E2EE is on for this chat but no key is set - upload cancelled");
-      return Promise.resolve();
-    }
     const uploads: any[] = Array.isArray(opts?.uploads) ? opts.uploads : Array.isArray(opts?.files) ? opts.files : [];
     if (!uploads.length) {
       notify("Unknown upload format - upload cancelled so nothing is sent unencrypted");
-      console.log("[aegires-e2ee] uploadLocalFiles args", Object.keys(opts ?? {}));
+      console.log("[aegires-e2ee] " + name + " args", Object.keys(opts ?? {}));
       return Promise.resolve();
     }
-    return (async () => {
-      try {
-        let tag = "";
-        for (const u of uploads) {
-          const s = await encryptUpload(u, key);
-          if (s && !tag) tag = makeSizeTag(s.w, s.h);
-        }
-        encryptCaption(channelId, opts, tag);
-      } catch (e) {
-        diag.lastAttError = String((e as any)?.message ?? e).slice(0, 80);
-        console.log("[aegires-e2ee] attachment encrypt failed", e);
-        notify("Attachment encryption failed - upload cancelled (" + diag.lastAttError + ")");
-        return;
-      }
-      return orig(...args);
-    })();
-  });
+    return encryptOutgoing(channelId, uploads, [opts?.parsedMessage, opts?.message]).then((ok) => (ok ? orig(...args) : undefined));
+  };
+}
+
+/** Hooks every upload function not hooked yet. Safe to call repeatedly. */
+export function retryUploadPatch(): void {
+  if (!active) return;
+  for (const n of NAMES) {
+    if (hooked.includes(n)) continue;
+    let mod: any;
+    try { mod = findFns(n); } catch {}
+    if (!mod) continue;
+    try {
+      undo.push(instead(n, mod, wrap(n)));
+      hooked.push(n);
+    } catch (e) {
+      console.log("[aegires-e2ee] could not hook " + n, e);
+    }
+  }
+  noteFound("upload module", uploadHooked());
+  diag.installed["upload hooks"] = hooked.length ? hooked.join(",") : `none yet (try ${tries})`;
+  if (!uploadHooked()) {
+    try { diag.installed["upload candidates"] = uploadCandidates(); } catch {}
+  }
+}
+
+export function installUploadPatch(): () => void {
+  active = true;
+  retryUploadPatch();
+  // Keep looking for the modules that appear later (each check is a cheap property scan).
+  timer = setInterval(() => {
+    tries++;
+    retryUploadPatch();
+    if (hooked.length === NAMES.length || tries > 120) { clearInterval(timer); timer = null; }
+  }, 5000);
+  return () => {
+    active = false;
+    if (timer) clearInterval(timer);
+    timer = null;
+    undo.slice().reverse().forEach((u) => { try { u(); } catch {} });
+    undo = [];
+    hooked = [];
+    tries = 0;
+  };
 }

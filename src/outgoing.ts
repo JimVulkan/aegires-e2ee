@@ -1,0 +1,128 @@
+// Shared encryption steps for everything we send: message text and attachments.
+//
+// Rule #1 is FAIL CLOSED: if encryption is switched on for a channel and anything goes wrong
+// (no key, text too long, no secure RNG, unreadable file), we do NOT send. Silently sending
+// plaintext to a channel where the user believes encryption is on would be the worst bug.
+import { notify } from "./notify.ts";
+import { RN } from "./rt.ts";
+import { MAX_PLAINTEXT_LEN, encryptBytes, encryptText, looksEncrypted } from "./crypto/wire.ts";
+import { MAX_FILE_BYTES, encryptedFileName, extOf, imageMimeFor, makeSizeTag } from "./crypto/files.ts";
+import { getSendKey, isEncryptionOn } from "./state.ts";
+import { readUri, tempName, writeCacheFile } from "./native.ts";
+import { diag } from "./diag.ts";
+
+export const BLOCK = Symbol("block");
+
+/**
+ * Returns the new content, null to leave the message alone, or BLOCK to cancel the send.
+ * `force` encrypts even where encryption is off (edits of encrypted messages, captions).
+ */
+export function prepare(channelId: string, content: unknown, force = false): string | null | typeof BLOCK {
+  if (typeof content !== "string" || content.length === 0) return null;
+  if (looksEncrypted(content)) return null; // already encrypted (e.g. our own re-send)
+  if (!force && !isEncryptionOn(channelId)) return null;
+
+  const key = getSendKey(channelId);
+  if (!key) {
+    notify("E2EE is on for this chat but no key is set - message not sent");
+    return BLOCK;
+  }
+  if (content.length > MAX_PLAINTEXT_LEN) {
+    notify(`Too long to encrypt (${content.length}/${MAX_PLAINTEXT_LEN}) - message not sent`);
+    return BLOCK;
+  }
+  try {
+    return encryptText(content, key);
+  } catch (e) {
+    notify("Encryption failed - message not sent");
+    console.log("[aegires-e2ee] encrypt error", e);
+    return BLOCK;
+  }
+}
+
+// ---------------------------------------------------------------- attachments
+
+const ENC_MIME = "application/octet-stream";
+
+function imageSize(uri: string): Promise<{ w: number; h: number } | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 3000);
+    try {
+      RN.Image.getSize(uri, (w: number, h: number) => { clearTimeout(t); resolve({ w, h }); }, () => { clearTimeout(t); resolve(null); });
+    } catch { clearTimeout(t); resolve(null); }
+  });
+}
+
+/** The object holding the local file info ({ uri, filename/name, mimeType }) of an upload. */
+function descriptorOf(u: any): any | null {
+  for (const c of [u?.item?.file, u?.item, u?.file, u]) {
+    if (c && typeof c === "object" && typeof c.uri === "string") return c;
+  }
+  return null;
+}
+
+/** Sets only fields the object already has (we must not invent a shape Discord doesn't use). */
+function setExisting(o: any, fields: Record<string, any>): void {
+  for (const [k, v] of Object.entries(fields)) {
+    if (o && k in o) {
+      try { o[k] = v; } catch {}
+    }
+  }
+}
+
+/** Encrypts one upload in place; returns the image size for the caption tag, if any. */
+async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: number } | null> {
+  const d = descriptorOf(u);
+  if (!d) throw new Error("unknown upload shape: " + Object.keys(u ?? {}).join(","));
+  const name: string = d.filename ?? d.name ?? u.filename ?? "file";
+  if (/\.enc(\.|$)/.test(name) && String(d.uri).includes("/aegires/")) return null; // already ours
+  const mime: string = d.mimeType ?? d.type ?? u.mimeType ?? "";
+  const src: string = d.originalUri ?? d.uri;
+
+  const bytes = await readUri(src, MAX_FILE_BYTES);
+  const size = mime.startsWith("image/") || imageMimeFor(name) ? await imageSize(src) : null;
+
+  const enc = encryptBytes(bytes, key);
+  const tmp = await writeCacheFile(tempName(extOf(name)), enc);
+  const encName = encryptedFileName(name);
+
+  setExisting(d, { uri: tmp, originalUri: tmp, filename: encName, name: encName, mimeType: ENC_MIME, type: ENC_MIME, contentType: ENC_MIME, size: enc.length, fileSize: enc.length });
+  // Never let Discord re-compress the ciphertext as if it were a photo or video.
+  if (d !== u) setExisting(u, { filename: encName, mimeType: ENC_MIME, isImage: false, isVideo: false, currentSize: enc.length, preCompressionSize: enc.length });
+  if (d.uri !== tmp) throw new Error("could not swap upload uri");
+  if ((d.filename ?? d.name ?? u.filename) !== encName) throw new Error("could not swap file name");
+  diag.attEncrypted++;
+  return size;
+}
+
+/**
+ * Encrypts every upload in place, then the caption(s) with the "[sz:W,H]" tag of the first
+ * image. Resolves true when it is safe to send; on any failure tells the user and resolves
+ * false (the caller must then NOT send).
+ */
+export async function encryptOutgoing(channelId: string, uploads: any[], captions: any[]): Promise<boolean> {
+  const key = getSendKey(channelId);
+  if (!key) {
+    notify("E2EE is on for this chat but no key is set - upload cancelled");
+    return false;
+  }
+  try {
+    let tag = "";
+    for (const u of uploads) {
+      const s = await encryptUpload(u, key);
+      if (s && !tag) tag = makeSizeTag(s.w, s.h);
+    }
+    for (const holder of captions) {
+      if (!holder || typeof holder.content !== "string") continue;
+      const out = prepare(channelId, tag + holder.content, true);
+      if (out === BLOCK) return false;
+      if (out !== null) holder.content = out;
+    }
+    return true;
+  } catch (e) {
+    diag.lastAttError = String((e as any)?.message ?? e).slice(0, 80);
+    console.log("[aegires-e2ee] attachment encrypt failed", e);
+    notify("Attachment encryption failed - upload cancelled (" + diag.lastAttError + ")");
+    return false;
+  }
+}

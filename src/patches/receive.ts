@@ -7,11 +7,13 @@
 // We run `before` dispatch and rewrite the message objects IN PLACE. No UI component is
 // patched (Discord's chat list is rendered natively), so this is the sturdiest hook point.
 // Nothing is written back to Discord: the server only ever sees ciphertext.
-import { before, findFlux, noteFound } from "../patch.ts";
+import { before, findFlux, noteFound, selectedChannelId } from "../patch.ts";
 import { storage } from "@vendetta/plugin";
 import { decryptText, looksEncrypted } from "../crypto/wire.ts";
 import { splitSizeTag } from "../crypto/files.ts";
-import { LOCK, getReceiveKeys } from "../state.ts";
+import { LOCK, getReceiveKeys, isEncryptionOn } from "../state.ts";
+import { notify } from "../notify.ts";
+import { retryUploadPatch, uploadHooked } from "./upload.ts";
 import { diag } from "../diag.ts";
 import { clearMedia, handleAttachments, setDispatcher } from "./media.ts";
 
@@ -67,10 +69,28 @@ function decryptMessage(m: any, fallbackChannelId?: string): void {
   }
 }
 
-function handleEvent(event: any): void {
+/**
+ * Upload-related events: they mean the upload module is now loaded, so try hooking it again.
+ * If we still have no upload hook, a file being attached in an encrypted chat is dropped
+ * (returns true) so it can never be sent in plaintext.
+ */
+function blockUnsafeUpload(event: any, type: string): boolean {
+  if (!/UPLOAD/.test(type)) return false;
+  if (!diag.uploadEvents.includes(type) && diag.uploadEvents.length < 10) diag.uploadEvents.push(type);
+  if (uploadHooked()) return false;
+  retryUploadPatch();
+  if (uploadHooked() || !/ADD/.test(type)) return false;
+  const channelId = String(event.channelId ?? event.channel_id ?? selectedChannelId() ?? "");
+  if (!channelId || !isEncryptionOn(channelId)) return false;
+  notify("This Discord version's upload code was not found yet, so attachments cannot be encrypted. The file was not attached. Turn encryption off for this chat to send it unencrypted, and report the Diagnostics output.");
+  return true;
+}
+
+function handleEvent(event: any): boolean {
   diag.events++;
-  if (!event || typeof event !== "object") return;
-  if (!event.message && !event.messages) return;
+  if (!event || typeof event !== "object") return false;
+  if (blockUnsafeUpload(event, String(event.type))) return true;
+  if (!event.message && !event.messages) return false;
   // Any event that carries message(s) is processed, whatever its name, so a renamed event
   // type in a new Discord version cannot silently disable decryption.
   diag.msgEvents++;
@@ -84,6 +104,7 @@ function handleEvent(event: any): void {
       else decryptMessage(m, event.channelId);
     }
   }
+  return false;
 }
 
 export function installReceivePatch(): () => void {
@@ -93,7 +114,7 @@ export function installReceivePatch(): () => void {
   setDispatcher((e) => flux.dispatch(e));
   const unpatch = before("dispatch", flux, (args) => {
     try {
-      handleEvent(args[0]);
+      if (handleEvent(args[0])) return [{ type: "AEGIRES_E2EE_BLOCKED_UPLOAD" }];
     } catch (e) {
       // Never let a bug here break Discord's own event handling.
       console.log("[aegires-e2ee] receive error", e);

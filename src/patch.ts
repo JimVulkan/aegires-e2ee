@@ -143,6 +143,20 @@ export function envSummary(): string {
   return `metro[${keys(vendetta?.metro)}] patcher[${keys(vendetta?.patcher)}] registry=${reg ? n + " mods, " + init + " init" : "NONE"}`;
 }
 
+/** Names of exported functions containing "upload" in initialised modules (for Diagnostics). */
+export function uploadCandidates(): string {
+  const names = new Set<string>();
+  scan((o) => {
+    try {
+      for (const k of Object.keys(o)) {
+        if (/upload/i.test(k) && typeof o[k] === "function") names.add(k);
+      }
+    } catch {}
+    return names.size >= 20;
+  });
+  return names.size ? Array.from(names).join(",") : "none";
+}
+
 export function noteFound(label: string, found: any): void {
   diag.installed["find " + label] = found ? "found" : "NOT FOUND";
 }

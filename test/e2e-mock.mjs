@@ -189,6 +189,17 @@ await Upload.uploadLocalFiles({ channelId: "777", uploads: [{ item: { uri: "file
 assert.equal(uploaded.at(-1).parsedMessage.content, "hi");
 console.log("  ok  upload fails closed (attachments off / unreadable file); plaintext chats untouched");
 
+const viaSend = { item: { uri: "file:///pics/photo.png", filename: "photo.png", mimeType: "image/png" }, filename: "photo.png", isImage: true };
+await MessageActions.sendMessage("123", { content: "cap" }, undefined, { attachmentsToUpload: [viaSend] });
+assert.equal(viaSend.item.filename, "photo.enc.png");
+assert.deepEqual(ref.decryptBytes(files.get(viaSend.item.uri.slice(7)), key), photo);
+assert.equal(ref.decrypt(sent.at(-1).content, key), "[sz:640,480]cap");
+console.log("  ok  sendMessage with attachmentsToUpload: files + caption encrypted");
+
+FluxDispatcher.dispatch({ type: "UPLOAD_ATTACHMENT_ADD_FILES", channelId: "123", files: [] });
+assert.equal(dispatched.at(-1).type, "UPLOAD_ATTACHMENT_ADD_FILES", "upload hook present => attach allowed");
+console.log("  ok  attaching files allowed while the upload hook is installed");
+
 // ---- attachments: receive -----------------------------------------------------------------
 const cdn = "https://cdn.discordapp.com/attachments/123/555/photo.enc.png?ex=1&is=2&hm=3";
 remote.set(cdn, encFile);
