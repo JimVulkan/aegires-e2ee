@@ -7,7 +7,7 @@
 // Commands are the least certain part of the plugin API across Kettu/Revenge versions, so
 // registration is wrapped in try/catch: if it fails the plugin still works via Settings.
 import { registerCommand } from "@vendetta/commands";
-import { showToast } from "@vendetta/ui/toasts";
+import { notify as showToast } from "./notify.ts";
 import { getSendKey, isEncryptionOn, setChannelEnabled } from "./state.ts";
 import { runSelfTest } from "./selftest.ts";
 

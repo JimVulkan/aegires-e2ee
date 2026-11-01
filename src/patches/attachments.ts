@@ -14,7 +14,7 @@
 import { before, instead, findFns, findFlux, selectedChannelId } from "../patch.ts";
 import { React, RN as ReactNative } from "../rt.ts";
 import { storage } from "@vendetta/plugin";
-import { showToast } from "@vendetta/ui/toasts";
+import { notify as showToast } from "../notify.ts";
 import { base64Decode, base64Encode } from "../crypto/base64.ts";
 import { decryptBytes, encryptBytes, looksEncrypted } from "../crypto/wire.ts";
 import { encryptedFileName, isEncryptedFileName, makeSizeTag } from "../crypto/files.ts";
@@ -172,7 +172,7 @@ function installRenderPatch(): () => void {
   hook("jsx", jsxRt, true);
   hook("jsxs", jsxRt, true);
   hook("createElement", React, false);
-  if (!undo.length) showToast("Aegires E2EE: could not hook rendering - encrypted images will not display");
+  if (!undo.length) throw new Error("could not hook rendering - encrypted images will not display");
   return () => undo.forEach((u) => u());
 }
 
@@ -267,8 +267,7 @@ async function encryptUpload(u: any, key: Uint8Array, channelId: string): Promis
 function installUploadPatch(): () => void {
   const mod = findFns("uploadLocalFiles");
   if (!mod) {
-    showToast("Aegires E2EE: upload hook not found - attachments are NOT encrypted");
-    return () => {};
+    throw new Error("upload hook not found - attachments are NOT encrypted");
   }
   return instead("uploadLocalFiles", mod, (args: any[], orig: (...a: any[]) => any) => {
     const opts = args[0];

@@ -1,6 +1,6 @@
 // Plugin entry point. The loader calls onLoad() when the plugin is enabled and onUnload()
 // when it is disabled; our job is to undo EVERYTHING we did in onLoad.
-import { showToast } from "@vendetta/ui/toasts";
+import { quiet } from "./notify.ts";
 import { initStorage } from "./state.ts";
 import { installSendPatch } from "./patches/send.ts";
 import { installReceivePatch } from "./patches/receive.ts";
@@ -26,7 +26,7 @@ function safely(name: string, install: () => () => void, retry = 3): void {
     diag.installed[name] = "FAILED: " + msg + (retry > 0 ? " (retrying)" : "");
     console.log(`[aegires-e2ee] ${name} failed to install`, e);
     if (retry > 0) timers.push(setTimeout(() => safely(name, install, retry - 1), 4000));
-    else showToast(`Aegires E2EE: ${name} failed: ${msg.slice(0, 60)}`);
+    else quiet(`${name} failed: ${msg}`);
   }
 }
 
@@ -35,7 +35,7 @@ export default {
     initStorage();
     try { diag.installed["env"] = envSummary(); } catch {}
     if (!hasSecureRandom()) {
-      showToast("Aegires E2EE: no secure random source - encrypting is impossible. Run the self-test in settings.");
+      quiet("no secure random source - encrypting is impossible. Run the self-test in settings.");
     }
     safely("send patch", installSendPatch);
     safely("receive patch", installReceivePatch);

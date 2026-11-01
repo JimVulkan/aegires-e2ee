@@ -50,7 +50,7 @@ const vendetta = {
   metro: {
     findByProps: (...p) => (p.includes("sendMessage") ? MessageActions : undefined),
     findByStoreName: () => ({ getChannelId: () => "999" }),
-    common: { React: { createElement: () => null, useState: (v) => [v, () => {}] }, ReactNative: new Proxy({}, { get: () => "RN" }), FluxDispatcher },
+    common: { React: { createElement: () => null, useState: (v) => [v, () => {}] }, ReactNative: new Proxy({}, { get: (_, k) => (k === "Alert" ? { alert: (_t, m) => toasts.push(m) } : "RN") }), FluxDispatcher },
   },
   plugin: { storage },
   storage: { useProxy: (s) => s },

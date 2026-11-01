@@ -4,7 +4,7 @@
 import { React, RN, comp, reactDiagnostics } from "../rt.ts";
 import { selectedChannelId } from "../patch.ts";
 import { storage } from "@vendetta/plugin";
-import { showToast } from "@vendetta/ui/toasts";
+import { notify as showToast } from "../notify.ts";
 import {
   clearGlobalKey,
   hasGlobalKey,

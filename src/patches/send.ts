@@ -9,7 +9,7 @@
 // (no key, text too long, no secure RNG), we do NOT send. Silently sending plaintext to a
 // channel where the user believes encryption is on would be the worst possible bug.
 import { findFns, instead, noteFound } from "../patch.ts";
-import { showToast } from "@vendetta/ui/toasts";
+import { notify as showToast } from "../notify.ts";
 import { storage } from "@vendetta/plugin";
 import { diag } from "../diag.ts";
 import { MAX_PLAINTEXT_LEN, encryptText, looksEncrypted } from "../crypto/wire.ts";
@@ -48,7 +48,7 @@ export function installSendPatch(): () => void {
   noteFound("sendMessage module", MessageActions);
   if (!MessageActions) {
     diag.installed["sendMessage lookup"] = "NOT FOUND";
-    showToast("Aegires E2EE: could not find Discord's sendMessage - sending is NOT encrypted");
+    throw new Error("sendMessage module not found - sending is NOT encrypted");
     return () => {};
   }
   const undo: Array<() => void> = [];
@@ -67,7 +67,6 @@ export function installSendPatch(): () => void {
           encryptionOn: typeof channelId === "string" ? isEncryptionOn(channelId) : null,
           hasKey: typeof channelId === "string" ? !!getSendKey(channelId) : null,
         });
-        if (typeof channelId === "string") showToast(`E2EE hook: on=${isEncryptionOn(channelId)} key=${!!getSendKey(channelId)}`);
       }
       if (message && typeof channelId === "string") {
         const out = prepare(channelId, message.content);
