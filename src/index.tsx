@@ -30,8 +30,27 @@ function safely(name: string, install: () => () => void, retry = 3): void {
   }
 }
 
+// Remove everything this instance installed.
+function unloadAll(): void {
+  timers.forEach((t) => clearTimeout(t));
+  timers = [];
+  undo.slice().reverse().forEach((u) => {
+    try { u(); } catch (e) { console.log("[aegires-e2ee] unpatch error", e); }
+  });
+  undo = [];
+}
+
+// If an older copy of this plugin is still active (Kettu updated the plugin without calling
+// its onUnload, or it was loaded twice), it leaves behind a second /e2ee command and double
+// patches. Every instance registers its unloader here so the next one can clean up first.
+const SLOT = "__aegiresE2EEUnload";
+
 export default {
   onLoad() {
+    const g: any = globalThis as any;
+    try { g[SLOT]?.(); } catch (e) { console.log("[aegires-e2ee] cleanup of previous instance failed", e); }
+    g[SLOT] = unloadAll;
+
     initStorage();
     try { diag.installed["env"] = envSummary(); } catch {}
     if (!hasSecureRandom()) {
@@ -43,12 +62,9 @@ export default {
     safely("commands", installCommands);
   },
   onUnload() {
-    timers.forEach((t) => clearTimeout(t));
-    timers = [];
-    undo.slice().reverse().forEach((u) => {
-      try { u(); } catch (e) { console.log("[aegires-e2ee] unpatch error", e); }
-    });
-    undo = [];
+    unloadAll();
+    const g: any = globalThis as any;
+    if (g[SLOT] === unloadAll) delete g[SLOT];
   },
   settings: Settings,
 };
