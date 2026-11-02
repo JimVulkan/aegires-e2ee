@@ -164,6 +164,17 @@ document.addEventListener("message", onMessage as any); // Android WebView deliv
 window.addEventListener("message", onMessage);
 const job = (globalThis as any).__aegJob;
 send({ ready: true, job: job?.id, caps: { wasm: typeof WebAssembly === "object", subtle: !!subtle } });
+
+// Debug channel that needs no message bridge: navigating reaches the plugin as a LoadingStart
+// event with this URL. Only while the engine has never worked (the plugin sets job.report).
+if (job?.report) {
+  setTimeout(() => {
+    const w: any = globalThis;
+    const keys = Object.getOwnPropertyNames(w).filter((k) => /webview|native|bridge|android|discord|rnc|post/i.test(k)).slice(0, 12).join("|");
+    const info = `page: rnwv=${typeof w.ReactNativeWebView}/${typeof w.ReactNativeWebView?.postMessage} queued=${outbox.length} origin=${location.origin} secure=${w.isSecureContext} wasm=${typeof WebAssembly} subtle=${!!subtle} keys=${keys}`;
+    location.replace("https://localhost/__aeg?" + encodeURIComponent(info));
+  }, 2500);
+}
 if (job) void handle(JSON.stringify(job));
 
 // Test hook (Node): the same handlers without a WebView.
