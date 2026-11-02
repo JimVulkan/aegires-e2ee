@@ -10,6 +10,19 @@ import { releaseViewer, viewerWebView } from "../engine/engine.tsx";
 const VIDEO = /\.(mp4|m4v|mov|webm|mkv|3gp)$/i;
 const ALERT_KEY = "aegires-video-player";
 
+// Also to logcat (ReactNativeJS), so a connected phone can be debugged with adb.
+function note(msg: string): void {
+  diag.installed["video player"] = msg;
+  console.log("[aegires-e2ee] video player:", msg);
+}
+
+const shape = (v: any, d = 0): string => {
+  if (v == null || typeof v !== "object") return typeof v === "string" ? JSON.stringify(v.slice(0, 80)) : String(v);
+  if (d > 2) return Array.isArray(v) ? `[${v.length}]` : "{…}";
+  if (Array.isArray(v)) return `[${v.slice(0, 3).map((x) => shape(x, d + 1)).join(",")}${v.length > 3 ? ",…" + v.length : ""}]`;
+  return "{" + Object.keys(v).slice(0, 14).map((k) => `${k}:${typeof v[k] === "function" ? "fn" : shape(v[k], d + 1)}`).join(",") + "}";
+};
+
 const isOurVideo = (s: unknown): s is string => typeof s === "string" && s.startsWith("file://") && s.includes("/aegires/") && VIDEO.test(s.split("?")[0]);
 
 /** Our decrypted video URIs anywhere in v (shallow-ish walk), in order. */
@@ -49,7 +62,10 @@ function Player({ uri }: { uri: string }): any {
   const Press = RN?.Pressable ?? comp("Pressable") ?? RN?.TouchableOpacity;
   const win = RN?.Dimensions?.get?.("window") ?? { width: 400, height: 800 };
   const key = React.useMemo(() => "aegires-player-" + Date.now(), []);
-  React.useEffect(() => () => releaseViewer(key), []);
+  React.useEffect(() => {
+    console.log("[aegires-e2ee] video player: mounted", uri);
+    return () => releaseViewer(key);
+  }, []);
   const cut = uri.lastIndexOf("/") + 1;
   const name = uri.slice(cut).replace(/[^\w.-]/g, "");
   const html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain}</style><video src="${name}" controls autoplay playsinline></video>`;
@@ -71,11 +87,11 @@ function Player({ uri }: { uri: string }): any {
 function openPlayer(uri: string): boolean {
   const a = alerts();
   if (!a) {
-    diag.installed["video player"] = "no alert host (openAlert) - using Discord's viewer";
+    note("no alert host (openAlert) - using Discord's viewer");
     return false;
   }
   a.openAlert(ALERT_KEY, <Player uri={uri} />);
-  diag.installed["video player"] = "opened " + uri.slice(uri.lastIndexOf("/") + 1);
+  note("opened " + uri.slice(uri.lastIndexOf("/") + 1));
   return true;
 }
 
@@ -83,29 +99,48 @@ function openPlayer(uri: string): boolean {
 // it loads (before the tap that loaded it calls it).
 export function installVideoPlayer(): () => void {
   let unpatch: (() => void) | null = null;
-  diag.installed["video player"] = "waiting for the media viewer to load";
+  note("waiting for the media viewer to load");
   const stop = whenModule((m: any) => typeof m?.openMediaModal === "function", (mod) => {
     try {
       unpatch = hookViewer(mod);
-      diag.installed["video player"] = "hooked";
+      note("hooked");
     } catch (e) {
-      diag.installed["video player"] = "hook failed: " + String((e as any)?.message ?? e).slice(0, 80);
+      note("hook failed: " + String((e as any)?.message ?? e).slice(0, 80));
     }
   });
+  // Debug: log what the chat's image-tap handlers receive (the tap may never reach the viewer).
+  const taps: Array<() => void> = [];
+  for (const name of ["handleTapImage", "onTapImage"]) {
+    try {
+      taps.push(whenModule((m: any) => typeof m?.[name] === "function", (mod) => {
+        try {
+          taps.push(instead(name, mod, (args, orig) => {
+            console.log(`[aegires-e2ee] video player: ${name}`, shape(args));
+            return orig(...args);
+          }));
+          console.log(`[aegires-e2ee] video player: watching ${name}`);
+        } catch (e) {
+          console.log(`[aegires-e2ee] video player: cannot watch ${name}`, e);
+        }
+      }));
+    } catch {}
+  }
   return () => {
     stop();
     unpatch?.();
+    taps.splice(0).forEach((u) => u());
   };
 }
 
 function hookViewer(mod: any): () => void {
   return instead("openMediaModal", mod, (args, orig) => {
+    console.log("[aegires-e2ee] video player: openMediaModal", shape(args));
     try {
       const uri = pickVideo(args);
       if (uri && openPlayer(uri)) return;
-      if (!uri) diag.installed["video player"] = "viewer opened on something else";
+      if (!uri) note("viewer opened on something else");
     } catch (e) {
-      diag.installed["video player"] = "failed: " + String((e as any)?.message ?? e).slice(0, 80);
+      note("failed: " + String((e as any)?.message ?? e).slice(0, 80));
     }
     return orig(...args);
   });
