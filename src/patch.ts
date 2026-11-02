@@ -47,6 +47,18 @@ function scan(pred: (o: any) => boolean): any {
 
 const isFn = (o: any, n: string) => typeof o[n] === "function";
 
+const isComponent = (c: any) => typeof c === "function" || (!!c && typeof c === "object" && !!c.$$typeof);
+
+/** Class or function component whose name / displayName is `name`. */
+export function findComponent(name: string): any {
+  return scan((o) => typeof o === "function" && (o.displayName === name || o.name === name));
+}
+
+/** Component exported under property `name` (e.g. react-native-webview's { WebView }). */
+export function findExportedComponent(name: string): any {
+  return scan((o) => isComponent(o[name]))?.[name];
+}
+
 /** Module whose given properties are all functions. */
 export function findFns(...names: string[]): any {
   const pred = (o: any) => names.every((n) => isFn(o, n));

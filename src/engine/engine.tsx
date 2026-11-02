@@ -5,8 +5,7 @@
 // mounted by <EngineHost/> (in the plugin settings, and in the chat input when it can be found);
 // the first mounted host runs the engine, the others stand by. Every caller must still work
 // without it: `call` rejects when no engine is ready, and callers fall back to the JS code.
-import { findByName, findByProps } from "@vendetta/metro";
-import { instead } from "../patch.ts";
+import { findComponent, findExportedComponent, instead } from "../patch.ts";
 import { React, RN } from "../rt.ts";
 import { diag } from "../diag.ts";
 
@@ -14,7 +13,7 @@ declare const __ENGINE_PAGE__: string;
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: any };
 
-let webViewComp: any;
+let webViewComp: any = null;
 let send: ((s: string) => void) | null = null;
 let ready = false;
 let readyWaiters: Array<(ok: boolean) => void> = [];
@@ -22,22 +21,17 @@ let seq = 0;
 const pending = new Map<number, Pending>();
 const hosts: Array<(on: boolean) => void> = [];
 
+// Looked up again on every mount until found: Discord may load the WebView module lazily.
+// (Not via @vendetta/metro: its finders throw on some Kettu builds, see patch.ts.)
 function WebViewComponent(): any {
-  if (webViewComp !== undefined) return webViewComp;
-  const tries: Array<() => any> = [
-    () => findByProps("WebView")?.WebView,
-    () => findByName("WebView", false)?.default,
-    () => findByName("WebView"),
-  ];
-  webViewComp = null;
-  for (const t of tries) {
-    try {
-      const c = t();
-      if (c && (typeof c === "function" || typeof c === "object")) return (webViewComp = c);
-    } catch {}
+  if (webViewComp) return webViewComp;
+  try {
+    webViewComp = findExportedComponent("WebView") ?? findComponent("WebView") ?? null;
+  } catch {
+    webViewComp = null;
   }
-  diag.engine = "no WebView component in this Discord";
-  return null;
+  if (!webViewComp) diag.engine = "no WebView component loaded in Discord yet";
+  return webViewComp;
 }
 
 function failAll(why: string): void {
@@ -166,8 +160,10 @@ export function EngineHost(): any {
  * input. Throws if the chat input is not loaded yet (the installer retries).
  */
 export function mountChatHost(): () => void {
-  const proto = findByName("ChatInput")?.prototype;
-  if (!proto || typeof proto.render !== "function") throw new Error("chat input not found yet");
+  const ChatInput = findComponent("ChatInput");
+  if (!ChatInput) throw new Error("chat input not loaded yet - open a chat");
+  const proto = ChatInput.prototype;
+  if (!proto || typeof proto.render !== "function") throw new Error("chat input is not a class component");
   const un = instead("render", proto, (args, orig) => {
     const ret = orig(...args);
     try {
