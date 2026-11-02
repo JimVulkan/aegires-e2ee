@@ -8,6 +8,7 @@
 // that returns module.exports.
 import { build } from "esbuild";
 import { transformAsync } from "@babel/core";
+import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
@@ -37,6 +38,15 @@ const page = await build({
 });
 const pageJs = page.outputFiles[0].text;
 
+// Which commit this bundle came from (Diagnostics), to tell a stale cached plugin from a new one.
+function buildId() {
+  try {
+    return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  } catch {
+    return "dev";
+  }
+}
+
 const result = await build({
   entryPoints: ["src/index.tsx"],
   bundle: true,
@@ -47,7 +57,7 @@ const result = await build({
   jsx: "transform",
   jsxFactory: "React.createElement",
   jsxFragment: "React.Fragment",
-  define: { "process.env.NODE_ENV": '"production"', __ENGINE_PAGE__: JSON.stringify(pageJs) },
+  define: { "process.env.NODE_ENV": '"production"', __ENGINE_PAGE__: JSON.stringify(pageJs), __BUILD__: JSON.stringify(buildId()) },
   logLevel: "info",
   plugins: [vendettaGlobals],
 });

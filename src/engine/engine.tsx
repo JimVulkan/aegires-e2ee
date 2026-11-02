@@ -512,7 +512,18 @@ function jobView(j: Job): any {
   const view = React.createElement(kind.comp, props);
   const t = kind.target;
   if (!t || !t.props.has("webViewKey") || !props.webViewKey) return view;
-  const target = React.createElement(t.name, { key: "target-" + props.webViewKey, webViewKey: props.webViewKey, style: { width: 1, height: 1, opacity: 0 } });
+  // The target may take the WebView over; its later events (messages, load requests) then carry
+  // the target's tag, so it gets the same handlers.
+  const tProps: any = { key: "target-" + props.webViewKey, webViewKey: props.webViewKey, style: { width: 1, height: 1, opacity: 0 } };
+  tProps[kind.msg ?? "onMessage"] = (e: any) => {
+    noteEvent("target message", null);
+    onPageMessage(e);
+  };
+  if (kind.startLoad) tProps[kind.startLoad] = (e: any) => approveLoad(j, e?.nativeEvent ?? e, "T ShouldStart");
+  for (const [top, prop] of Object.entries(kind.events ?? {})) {
+    if (/^top(Loading|HttpError|RenderProcessGone)/.test(top)) tProps[prop] = (e: any) => noteEvent("T " + top.slice(3), e?.nativeEvent);
+  }
+  const target = React.createElement(t.name, tProps);
   return [view, target];
 }
 

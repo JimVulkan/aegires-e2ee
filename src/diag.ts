@@ -1,3 +1,4 @@
+declare const __BUILD__: string;
 // Live counters shown in the plugin settings ("Diagnostics" card), so we can see what the
 // hooks are actually doing on the phone without a console.
 export const diag = {
@@ -44,7 +45,7 @@ export function diagLines(): string[] {
     `attachments encrypted: ${diag.attEncrypted}`,
     `upload events: ${diag.uploadEvents.join(", ") || "none"}`,
     ...(diag.lastAttError ? [`last attachment error: ${diag.lastAttError}`] : []),
-    `fast engine (WebView): ${diag.engine}`,
+    `fast engine (WebView): ${diag.engine} [build ${typeof __BUILD__ === "string" ? __BUILD__ : "dev"}]`,
     `engine jobs / JS fallbacks: ${diag.engineJobs} / ${diag.engineFallbacks}`,
     ...(diag.engineLastError ? [`last engine error: ${diag.engineLastError}`] : []),
   ];
