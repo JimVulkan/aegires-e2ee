@@ -103,6 +103,35 @@ function probe(): string {
     }
   });
   if (comps.size) out.push("component names: " + Array.from(comps).slice(0, 15).join(","));
+  // Discord's own WebView (RNCWebViewContainer / RNCWebViewTarget): describe that module's API.
+  const desc = (v: any): string => {
+    if (typeof v === "string") return `"${v.slice(0, 40)}"`;
+    if (typeof v === "function") return `fn${v.length}${v.name ? ":" + v.name : ""}${v.displayName ? ":" + v.displayName : ""}${v.prototype?.render ? ":class" : ""}`;
+    if (v && typeof v === "object") return v.$$typeof ? `elem(${String(v.$$typeof.toString?.() ?? "").slice(7, 20)}${v.render ? ",render" : ""}${typeof v.type === "string" ? ",type=" + v.type : ""})` : `obj{${t(() => Object.keys(v).slice(0, 8).join(","))}}`;
+    return typeof v;
+  };
+  const seen = new Set<any>();
+  eachExport((o) => {
+    if (!o || (typeof o !== "object" && typeof o !== "function") || seen.has(o)) return;
+    let ks: string[] = [];
+    try { ks = Object.keys(o); } catch {}
+    if (!ks.some((k) => /^RNCWebView/.test(k))) return;
+    seen.add(o);
+    out.push("WEBVIEW MODULE {" + ks.slice(0, 30).map((k) => `${k}=${t(() => desc(o[k]))}`).join(", ") + "}");
+  });
+  const nm = t(() => g.nativeModuleProxy?.RNCWebView);
+  if (nm && nm !== "err") {
+    const own = t(() => Object.keys(nm).join(",")) || "";
+    const forIn: string[] = [];
+    try { for (const k in nm) forIn.push(k); } catch {}
+    const guesses = ["postMessage", "injectJavaScript", "createWebView", "loadUrl", "evaluateJavascript", "reload", "goBack", "stopLoading", "isFileUploadSupported", "shouldStartLoadWithLockIdentifier", "clearCache", "requestFocus", "getConstants", "addListener", "removeListeners", "messageResult", "onMessage"]
+      .filter((k) => t(() => typeof nm[k]) === "function");
+    out.push(`NATIVE RNCWebView keys[${own}] forin[${forIn.slice(0, 30).join(",")}] fns[${guesses.join(",")}] consts[${t(() => JSON.stringify(nm.getConstants?.() ?? null)?.slice(0, 200))}]`);
+  }
+  for (const n of ["RNCWebViewContainer", "RNCWebViewTarget", "DCDWebView", "RNCWebViewComponent"]) {
+    const r = t(() => hc?.(n));
+    if (r) out.push(`hasComponent ${n}=${r}`);
+  }
   if (keys.size) out.push("exports: " + Array.from(keys).slice(0, 25).join(","));
   out.push(`arch: ${g.nativeFabricUIManager ? "fabric" : "paper"}${g.RN$Bridgeless ? " bridgeless" : ""}`);
   return out.join("; ");
