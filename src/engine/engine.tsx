@@ -54,7 +54,10 @@ function noteEvent(label: string, ne: any): void {
   const at = url.indexOf("__aeg?");
   if (at >= 0) {
     if (/Error/.test(label)) return; // the same report again, failing to load (nothing serves it)
-    extra = "REPORT " + safeDecode(url.slice(at + 6)).slice(0, 220);
+    const rep = safeDecode(url.slice(at + 6)).slice(0, 300);
+    const reports = (diag.installed["webview reports"] ?? "").split(" || ").filter((x: string) => x && x !== rep);
+    diag.installed["webview reports"] = [...reports.slice(-3), rep].join(" || ");
+    extra = "REPORT " + rep.slice(0, 40);
   } else if (url && /Start|Finish/.test(label)) extra += " " + url.slice(0, 24);
   seenEvents.push(label + (extra.trim() ? ":" + extra.trim().slice(0, 180) : ""));
   if (seenEvents.length > 12) seenEvents.shift();
@@ -488,6 +491,8 @@ function jobView(j: Job): any {
     for (const [top, prop] of Object.entries(kind.events ?? {})) {
       if (/^top(Loading|HttpError|RenderProcessGone)/.test(top)) props[prop] = (e: any) => noteEvent(top.slice(3), e?.nativeEvent);
     }
+    // The page's own navigations (our reports) ask first; unanswered, Android blocks them silently.
+    if (kind.startLoad) props[kind.startLoad] = (e: any) => approveLoad(j, e?.nativeEvent ?? e, "ShouldStart");
     props.ref = (r: any) => {
       if (r) j.ref = r;
     };
@@ -511,16 +516,24 @@ function jobView(j: Job): any {
   return [view, target];
 }
 
+/** Answers the WebView's "may I load this URL?": report URLs are only read, anything else loads. */
+function approveLoad(j: Job | null, ne: any, label: string): void {
+  noteEvent(label, ne);
+  const url = typeof ne?.url === "string" ? ne.url : "";
+  const allow = !url.includes("__aeg?");
+  const lock = ne?.lockIdentifier;
+  if (lock != null && lock !== 0) {
+    try { (globalThis as any).nativeModuleProxy?.RNCWebView?.onShouldStartLoadWithRequestCallback?.(allow, lock); } catch {}
+  } else if (allow && j && url) command(j, "loadUrl", [url]);
+}
+
 let messagingRegistered = false;
 
 /** Registers MESSAGING_MODULE as a JS module the native WebView can call (onMessage, load approval). */
 function registerMessaging(): boolean {
   if (messagingRegistered) return true;
   const g: any = globalThis as any;
-  const approve = (e: any) => {
-    const ne = e?.nativeEvent ?? e;
-    try { g.nativeModuleProxy?.RNCWebView?.onShouldStartLoadWithRequestCallback?.(true, ne?.lockIdentifier); } catch {}
-  };
+  const approve = (e: any) => approveLoad(null, e?.nativeEvent ?? e, "module ShouldStart");
   const mod = {
     onMessage: (e: any) => {
       noteEvent("module message", null);
