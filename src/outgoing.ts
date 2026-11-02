@@ -11,7 +11,9 @@ import { storage } from "@vendetta/plugin";
 import { encryptFile, encryptMessage, maxPlaintextBytes, utf8Length } from "./crypto/v2.ts";
 import { getSendFormat, getSendKey, getSendKeyV2, getSendPreset, isEncryptionOn } from "./state.ts";
 import { getSelfId } from "./self.ts";
-import { readUri, tempName, writeCacheFile } from "./native.ts";
+import { readUri, readUriBase64, tempName, writeCacheFile, writeCacheFileBase64 } from "./native.ts";
+import { base64Encode } from "./crypto/base64.ts";
+import { call, engineReady } from "./engine/engine.tsx";
 import { diag } from "./diag.ts";
 
 export const BLOCK = Symbol("block");
@@ -96,7 +98,26 @@ function setExisting(o: any, fields: Record<string, any>): void {
 /** Encrypted temp file uri -> image size of the original (files encrypted when attached). */
 const sizes = new Map<string, { w: number; h: number } | null>();
 
-type Seal = (plain: Uint8Array) => Uint8Array;
+/** JS sealing (Hermes), plus the same job as arguments for the WebView engine's sealFile. */
+type Seal = { local: (plain: Uint8Array) => Uint8Array; engine: Record<string, unknown> };
+
+/** Encrypts the file in the WebView engine; null if the engine is unavailable or failed. */
+async function sealInEngine(src: string, seal: Seal, ext: string): Promise<{ uri: string; size: number } | null> {
+  if (!engineReady()) return null;
+  try {
+    const data = await readUriBase64(src, MAX_FILE_BYTES);
+    const r = await call<{ data: string; size: number }>("sealFile", { ...seal.engine, data });
+    const uri = await writeCacheFileBase64(tempName(ext), r.data);
+    diag.engineJobs++;
+    return { uri, size: r.size };
+  } catch (e) {
+    const msg = String((e as any)?.message ?? e);
+    if (msg === "file too large") throw e;
+    diag.engineFallbacks++;
+    diag.engineLastError = msg.slice(0, 80);
+    return null;
+  }
+}
 
 /** Encrypts one upload in place; returns the image size for the caption tag, if any. */
 async function encryptUpload(u: any, seal: Seal): Promise<{ w: number; h: number } | null> {
@@ -107,16 +128,20 @@ async function encryptUpload(u: any, seal: Seal): Promise<{ w: number; h: number
   const mime: string = d.mimeType ?? d.type ?? u.mimeType ?? "";
   const src: string = d.originalUri ?? d.uri;
 
-  const bytes = await readUri(src, MAX_FILE_BYTES);
   const size = mime.startsWith("image/") || imageMimeFor(name) ? await imageSize(src) : null;
 
-  const enc = seal(bytes);
-  const tmp = await writeCacheFile(tempName(extOf(name)), enc);
+  let sealed = await sealInEngine(src, seal, extOf(name));
+  if (!sealed) {
+    const enc = seal.local(await readUri(src, MAX_FILE_BYTES));
+    sealed = { uri: await writeCacheFile(tempName(extOf(name)), enc), size: enc.length };
+  }
+  const tmp = sealed.uri;
+  const encSize = sealed.size;
   const encName = encryptedFileName(name);
 
-  setExisting(d, { uri: tmp, originalUri: tmp, filename: encName, name: encName, mimeType: ENC_MIME, type: ENC_MIME, contentType: ENC_MIME, size: enc.length, fileSize: enc.length });
+  setExisting(d, { uri: tmp, originalUri: tmp, filename: encName, name: encName, mimeType: ENC_MIME, type: ENC_MIME, contentType: ENC_MIME, size: encSize, fileSize: encSize });
   // Never let Discord re-compress the ciphertext as if it were a photo or video.
-  if (d !== u) setExisting(u, { filename: encName, mimeType: ENC_MIME, isImage: false, isVideo: false, currentSize: enc.length, preCompressionSize: enc.length });
+  if (d !== u) setExisting(u, { filename: encName, mimeType: ENC_MIME, isImage: false, isVideo: false, currentSize: encSize, preCompressionSize: encSize });
   if (d.uri !== tmp) throw new Error("could not swap upload uri");
   if ((d.filename ?? d.name ?? u.filename) !== encName) throw new Error("could not swap file name");
   sizes.set(tmp, size);
@@ -146,14 +171,14 @@ export async function encryptOutgoing(channelId: string, uploads: any[], caption
       return false;
     }
     const preset = getSendPreset(channelId);
-    seal = (b) => encryptFile(b, key, preset, channelId, self);
+    seal = { local: (b) => encryptFile(b, key, preset, channelId, self), engine: { fmt: "v2", key: base64Encode(key), preset: preset.index, ch: channelId, sender: self } };
   } else {
     const key = getSendKey(channelId);
     if (!key) {
       notify("E2EE is on for this chat but no key is set - upload cancelled");
       return false;
     }
-    seal = (b) => encryptBytes(b, key);
+    seal = { local: (b) => encryptBytes(b, key), engine: { fmt: "v1", key: base64Encode(key) } };
   }
   try {
     let tag = "";

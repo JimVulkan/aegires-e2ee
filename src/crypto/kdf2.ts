@@ -32,9 +32,21 @@ export type KdfOptions = {
   memoryKiB?: number;
 };
 
+/** Faster Argon2id elsewhere (the WebView engine); resolves null to use the JS code here. */
+export type Argon2Offload = (password: Uint8Array, salt: Uint8Array, t: number, mKiB: number, len: number) => Promise<Uint8Array | null>;
+let offload: Argon2Offload | null = null;
+
+export function setArgon2Offload(fn: Argon2Offload | null): void {
+  offload = fn;
+}
+
 export async function deriveMasterKey(password: string, opts: KdfOptions = {}): Promise<Uint8Array> {
   if (!password) throw new Error("empty password");
   const salt = utf8Encode(opts.context === undefined ? USER_KEY_SALT : "dcenc2|ctx|" + opts.context);
+  if (offload) {
+    const fast = await offload(utf8Encode(normalize(password)), salt, ARGON_T, opts.memoryKiB ?? ARGON_M_KIB, MASTER_LEN).catch(() => null);
+    if (fast && fast.length === MASTER_LEN) return fast;
+  }
   // Lazy import: BLAKE2b (@noble/hashes) uses BigInt at module load. Loading it only when a key is
   // derived means a runtime without BigInt can still decrypt/encrypt with stored keys.
   const { argon2id } = await import("./argon2.ts");

@@ -71,12 +71,34 @@ export async function readUri(uri: string, maxBytes: number): Promise<Uint8Array
   return bytes;
 }
 
+/** Like readUri, but resolves to base64; local files skip the bytes entirely (WebView engine). */
+export async function readUriBase64(uri: string, maxBytes: number): Promise<string> {
+  const fm = fileModule();
+  if (/^(file:\/\/|\/)/.test(uri) && fm && typeof fm.readFile === "function") {
+    try {
+      const b64 = String(await fm.readFile(toPath(uri), "base64"));
+      if (b64) {
+        if (Math.floor((b64.length * 3) / 4) > maxBytes + 2) throw new Error("file too large");
+        return b64;
+      }
+    } catch (e) {
+      if ((e as any)?.message === "file too large") throw e;
+    }
+  }
+  return base64Encode(await readUri(uri, maxBytes));
+}
+
 /** Writes bytes to <cache>/aegires/<name>; resolves to a file:// URI. */
-export async function writeCacheFile(name: string, bytes: Uint8Array): Promise<string> {
+export function writeCacheFile(name: string, bytes: Uint8Array): Promise<string> {
+  return writeCacheFileBase64(name, base64Encode(bytes));
+}
+
+/** Writes base64 data to <cache>/aegires/<name>; resolves to a file:// URI. */
+export async function writeCacheFileBase64(name: string, b64: string): Promise<string> {
   const fm = fileModule();
   if (!fm) throw new Error("no native file module");
   const rel = `${DIR}/${name}`;
-  const ret = await fm.writeFile("cache", rel, base64Encode(bytes), "base64");
+  const ret = await fm.writeFile("cache", rel, b64, "base64");
   let path = typeof ret === "string" && ret.startsWith("/") ? ret : "";
   if (!path) {
     const dir = cacheDir(fm);

@@ -10,6 +10,23 @@ import { hasSecureRandom } from "./crypto/random.ts";
 import Settings from "./ui/Settings.tsx";
 import { diag } from "./diag.ts";
 import { envSummary } from "./patch.ts";
+import { setArgon2Offload } from "./crypto/kdf2.ts";
+import { base64Decode, base64Encode } from "./crypto/base64.ts";
+import { call, mountChatHost, stopEngine, waitEngine } from "./engine/engine.tsx";
+
+/** Argon2id in the WebView engine (WebAssembly); null means "use the JS code". */
+async function engineArgon2(p: Uint8Array, s: Uint8Array, t: number, m: number, len: number): Promise<Uint8Array | null> {
+  if (!(await waitEngine(5000))) return null;
+  try {
+    const out = base64Decode(await call<string>("argon2", { p: base64Encode(p), s: base64Encode(s), t, m, len }, 300000));
+    diag.engineJobs++;
+    return out;
+  } catch (e) {
+    diag.engineFallbacks++;
+    diag.engineLastError = String((e as any)?.message ?? e).slice(0, 80);
+    return null;
+  }
+}
 
 let undo: Array<() => void> = [];
 
@@ -60,6 +77,12 @@ export default {
     safely("receive patch", installReceivePatch);
     safely("upload patch", installUploadPatch);
     safely("commands", installCommands);
+    setArgon2Offload(engineArgon2);
+    undo.push(() => {
+      setArgon2Offload(null);
+      stopEngine();
+    });
+    safely("engine chat host", mountChatHost, 15);
   },
   onUnload() {
     unloadAll();

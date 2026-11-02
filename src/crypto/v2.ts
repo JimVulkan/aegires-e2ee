@@ -192,7 +192,16 @@ export function messagePreset(wire: string): Preset | null {
 
 // ------------------------------------------------------------------ files
 
-export function encryptFile(plain: Uint8Array, master: Uint8Array, preset: Preset, channelId: string, senderId: string): Uint8Array {
+/** One AES-GCM operation of a file (one 64 KiB chunk). */
+export type GcmJob = { key: Uint8Array; nonce: Uint8Array; aad: Uint8Array; data: Uint8Array; tagLen: number };
+/** Runs many GCM jobs at once, e.g. WebCrypto in the WebView engine (src/engine/page.ts). */
+export interface GcmBatch {
+  seal(jobs: GcmJob[]): Promise<Uint8Array[]>;
+  open(jobs: GcmJob[]): Promise<Array<Uint8Array | null>>;
+}
+
+/** Output buffer with header + salt filled in, and one seal job per chunk (written at at[i]). */
+function planSeal(plain: Uint8Array, master: Uint8Array, preset: Preset, channelId: string, senderId: string): { out: Uint8Array; jobs: GcmJob[]; at: number[] } {
   if (!channelId || !senderId) throw new Error("channel/sender id missing");
   const header = (VERSION_FILE << 4) | preset.index;
   const salt = randomBytes(SALT_LEN);
@@ -206,43 +215,87 @@ export function encryptFile(plain: Uint8Array, master: Uint8Array, preset: Prese
   const out = new Uint8Array(1 + SALT_LEN + plain.length + chunks * preset.tagBytes);
   out[0] = header;
   out.set(salt, 1);
+  const jobs: GcmJob[] = [];
+  const at: number[] = [];
   let o = 1 + SALT_LEN;
   for (let c = 0; c < chunks; c++) {
-    const part = plain.subarray(c * FILE_CHUNK, Math.min(plain.length, (c + 1) * FILE_CHUNK));
-    const sealed = gcmSeal(key, chunkNonce(noncePrefix, c, c === chunks - 1), aad, part, preset.tagBytes);
-    out.set(sealed, o);
-    o += sealed.length;
+    const data = plain.subarray(c * FILE_CHUNK, Math.min(plain.length, (c + 1) * FILE_CHUNK));
+    jobs.push({ key, nonce: chunkNonce(noncePrefix, c, c === chunks - 1), aad, data, tagLen: preset.tagBytes });
+    at.push(o);
+    o += data.length + preset.tagBytes;
   }
-  return out;
+  return { out, jobs, at };
+}
+
+/** One open job per chunk; plaintext chunk i goes to out[i * 64 KiB]. Null: not a v2 file. */
+function planOpen(wire: Uint8Array, master: Uint8Array, channelId: string, senderId: string): { out: Uint8Array; jobs: GcmJob[] } | null {
+  if (!wire || wire.length < 1 + SALT_LEN || !master || !channelId || !senderId) return null;
+  const header = wire[0];
+  if (header >> 4 !== VERSION_FILE) return null;
+  const preset = presetFromIndex(header & 0x0f);
+  if (!preset) return null;
+  const salt = wire.subarray(1, 1 + SALT_LEN);
+  const inf = info("file", preset, channelId, senderId);
+  const okm = hkdf(sha256, master, salt, inf, preset.keyBytes + FILE_PREFIX_LEN);
+  const key = okm.subarray(0, preset.keyBytes);
+  const noncePrefix = okm.subarray(preset.keyBytes);
+  const aad = aadOf(header, salt, inf);
+
+  const body = wire.subarray(1 + SALT_LEN);
+  const chunkCt = FILE_CHUNK + preset.tagBytes;
+  if (body.length < preset.tagBytes) return null;
+  const chunks = Math.ceil(body.length / chunkCt);
+  const jobs: GcmJob[] = [];
+  for (let c = 0; c < chunks; c++) {
+    const data = body.subarray(c * chunkCt, Math.min(body.length, (c + 1) * chunkCt));
+    if (data.length < preset.tagBytes) return null;
+    jobs.push({ key, nonce: chunkNonce(noncePrefix, c, c === chunks - 1), aad, data, tagLen: preset.tagBytes });
+  }
+  return { out: new Uint8Array(body.length - chunks * preset.tagBytes), jobs }; // no per-chunk copies + concat
+}
+
+export function encryptFile(plain: Uint8Array, master: Uint8Array, preset: Preset, channelId: string, senderId: string): Uint8Array {
+  const p = planSeal(plain, master, preset, channelId, senderId);
+  p.jobs.forEach((j, i) => p.out.set(gcmSeal(j.key, j.nonce, j.aad, j.data, j.tagLen), p.at[i]));
+  return p.out;
 }
 
 export function decryptFile(wire: Uint8Array, master: Uint8Array, channelId: string, senderId: string): Uint8Array | null {
   try {
-    if (!wire || wire.length < 1 + SALT_LEN || !master || !channelId || !senderId) return null;
-    const header = wire[0];
-    if (header >> 4 !== VERSION_FILE) return null;
-    const preset = presetFromIndex(header & 0x0f);
-    if (!preset) return null;
-    const salt = wire.subarray(1, 1 + SALT_LEN);
-    const inf = info("file", preset, channelId, senderId);
-    const okm = hkdf(sha256, master, salt, inf, preset.keyBytes + FILE_PREFIX_LEN);
-    const key = okm.subarray(0, preset.keyBytes);
-    const noncePrefix = okm.subarray(preset.keyBytes);
-    const aad = aadOf(header, salt, inf);
-
-    const body = wire.subarray(1 + SALT_LEN);
-    const chunkCt = FILE_CHUNK + preset.tagBytes;
-    if (body.length < preset.tagBytes) return null;
-    const chunks = Math.ceil(body.length / chunkCt);
-    const out = new Uint8Array(body.length - chunks * preset.tagBytes); // no per-chunk copies + concat
-    for (let c = 0; c < chunks; c++) {
-      const piece = body.subarray(c * chunkCt, Math.min(body.length, (c + 1) * chunkCt));
-      if (piece.length < preset.tagBytes) return null;
-      const plain = gcmOpen(key, chunkNonce(noncePrefix, c, c === chunks - 1), aad, piece, preset.tagBytes);
+    const p = planOpen(wire, master, channelId, senderId);
+    if (!p) return null;
+    for (let c = 0; c < p.jobs.length; c++) {
+      const j = p.jobs[c];
+      const plain = gcmOpen(j.key, j.nonce, j.aad, j.data, j.tagLen);
       if (!plain) return null;
-      out.set(plain, c * FILE_CHUNK);
+      p.out.set(plain, c * FILE_CHUNK);
     }
-    return out;
+    return p.out;
+  } catch {
+    return null;
+  }
+}
+
+/** encryptFile with the AES-GCM work done by `batch`. */
+export async function encryptFileWith(batch: GcmBatch, plain: Uint8Array, master: Uint8Array, preset: Preset, channelId: string, senderId: string): Promise<Uint8Array> {
+  const p = planSeal(plain, master, preset, channelId, senderId);
+  const sealed = await batch.seal(p.jobs);
+  sealed.forEach((x, i) => p.out.set(x, p.at[i]));
+  return p.out;
+}
+
+/** decryptFile with the AES-GCM work done by `batch`. */
+export async function decryptFileWith(batch: GcmBatch, wire: Uint8Array, master: Uint8Array, channelId: string, senderId: string): Promise<Uint8Array | null> {
+  try {
+    const p = planOpen(wire, master, channelId, senderId);
+    if (!p) return null;
+    const opened = await batch.open(p.jobs);
+    for (let c = 0; c < opened.length; c++) {
+      const plain = opened[c];
+      if (!plain) return null;
+      p.out.set(plain, c * FILE_CHUNK);
+    }
+    return p.out;
   } catch {
     return null;
   }

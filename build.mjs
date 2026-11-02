@@ -23,6 +23,19 @@ const vendettaGlobals = {
 
 const minify = process.env.MINIFY === "1";
 
+// The WebView crypto engine page runs in Chrome's engine, not Hermes: bundle it on its own and
+// embed it in the plugin as a string (src/engine/engine.tsx wraps it in HTML).
+const page = await build({
+  entryPoints: ["src/engine/page.ts"],
+  bundle: true,
+  write: false,
+  format: "iife",
+  target: "es2020",
+  minify: true,
+  logLevel: "warning",
+});
+const pageJs = page.outputFiles[0].text;
+
 const result = await build({
   entryPoints: ["src/index.tsx"],
   bundle: true,
@@ -33,7 +46,7 @@ const result = await build({
   jsx: "transform",
   jsxFactory: "React.createElement",
   jsxFragment: "React.Fragment",
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', __ENGINE_PAGE__: JSON.stringify(pageJs) },
   logLevel: "info",
   plugins: [vendettaGlobals],
 });
@@ -48,4 +61,4 @@ await mkdir("dist", { recursive: true });
 await writeFile("dist/index.js", code);
 await writeFile("dist/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
 await writeFile("dist/.nojekyll", "");
-console.log(`built dist/index.js (${(code.length / 1024).toFixed(0)} KB)${minify ? " [minified]" : ""}`);
+console.log(`built dist/index.js (${(code.length / 1024).toFixed(0)} KB, engine page ${(pageJs.length / 1024).toFixed(0)} KB)${minify ? " [minified]" : ""}`);

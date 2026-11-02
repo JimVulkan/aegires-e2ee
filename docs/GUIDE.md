@@ -58,6 +58,23 @@ Improvements over upstream `experimental-v2`, all still readable by any v2 decod
 - **File decryption without per-chunk copies**: chunks are written into one preallocated buffer.
 - **Media**: attachments are encrypted/decrypted in the v2 file format; v1 files still open.
 
+## Fast crypto engine (WebView)
+
+Discord runs plugins on Hermes: an interpreter with no JIT and no WebAssembly, and plugins cannot
+load native code. Discord does ship a WebView, which runs Chrome's engine. The plugin mounts a
+1x1 invisible WebView (`src/engine/engine.tsx`; in the plugin settings, and next to the chat
+input when found) running `src/engine/page.ts`:
+
+- Argon2id key derivation in WebAssembly (`hash-wasm`)
+- whole attachments: AES-GCM on WebCrypto (native, hardware AES; AES-192, which WebCrypto lacks,
+  uses our JS AES JIT-compiled), HKDF, chunking, image/video size, and the CDN download itself.
+  Hermes only passes base64 strings between Discord's native file module and the WebView.
+
+Everything falls back to the JS code if the engine is missing, loading or fails. Its state is in
+the Diagnostics card (`fast engine (WebView)`, `engine jobs / JS fallbacks`). The JS fallback is
+itself tuned for an interpreter: allocation-free Argon2id (`argon2.ts`, ~2x @noble/hashes) and
+flat T-table AES-CTR (`aesfast.ts`).
+
 ## Wire format (Aegires v1, legacy)
 
 ```

@@ -19,6 +19,10 @@ export const diag = {
   attEncrypted: 0,
   lastAttError: "",
   uploadEvents: [] as string[], // upload-related Flux event types seen
+  engine: "not started", // WebView crypto engine state
+  engineJobs: 0, // operations done by the engine
+  engineFallbacks: 0, // operations that fell back to the JS code
+  engineLastError: "",
 };
 
 export function diagLines(): string[] {
@@ -40,5 +44,8 @@ export function diagLines(): string[] {
     `attachments encrypted: ${diag.attEncrypted}`,
     `upload events: ${diag.uploadEvents.join(", ") || "none"}`,
     ...(diag.lastAttError ? [`last attachment error: ${diag.lastAttError}`] : []),
+    `fast engine (WebView): ${diag.engine}`,
+    `engine jobs / JS fallbacks: ${diag.engineJobs} / ${diag.engineFallbacks}`,
+    ...(diag.engineLastError ? [`last engine error: ${diag.engineLastError}`] : []),
   ];
 }

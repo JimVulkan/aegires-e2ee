@@ -22,6 +22,7 @@ import { FORCED_CHANNELS } from "../forced.ts";
 import { getSelfId } from "../self.ts";
 import { measureKdf, runSelfTest } from "../selftest.ts";
 import { diagLines } from "../diag.ts";
+import { EngineHost } from "../engine/engine.tsx";
 
 const View = comp("View");
 const Text = comp("Text");
@@ -126,6 +127,7 @@ function SettingsInner() {
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
+      <EngineHost />
       <Card
         title={"Global key " + (hasGlobalKey() ? "(set)" : "(not set)")}
         hint="Used in every chat that has no channel key. Everyone in the chat must type the SAME password (at least 8 characters), and Aegires users must use the same one in the app. The password is not saved - only the keys derived from it (v1 and v2). Deriving the v2 key (Argon2id, 64 MiB) can take a while on a phone."

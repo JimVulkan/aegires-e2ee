@@ -13,7 +13,8 @@ import { MAX_FILE_BYTES, extOf, imageDims, imageMimeFor, videoDims, isEncryptedF
 import { base64Encode } from "../crypto/base64.ts";
 import { decryptFile } from "../crypto/v2.ts";
 import { getReceiveKeys, getReceiveKeysV2 } from "../state.ts";
-import { readUri, removeCacheFiles, writeCacheFile } from "../native.ts";
+import { readUri, removeCacheFiles, writeCacheFile, writeCacheFileBase64 } from "../native.ts";
+import { call, engineReady } from "../engine/engine.tsx";
 import { diag } from "../diag.ts";
 
 const log = (...a: any[]) => { if (storage.debug) console.log("[aegires-e2ee:media]", ...a); };
@@ -90,8 +91,57 @@ function openFile(blob: Uint8Array, k: Keys): Uint8Array | null {
   return null;
 }
 
+type EngineOpen = { data: string; size: number; w?: number; h?: number } | null;
+
+/**
+ * Downloads and decrypts in the WebView engine (fetching the CDN URL itself when it can), so the
+ * plaintext only crosses into Hermes as base64 for the file write. Undefined: use the JS path.
+ */
+async function decryptInEngine(a: any, keys: Keys, url: string, name: string, mime: string): Promise<Decrypted | undefined> {
+  if (!engineReady()) return undefined;
+  const max = MAX_FILE_BYTES + 64 * 1024;
+  const args = {
+    v2: keys.v2.map((k) => base64Encode(k)),
+    v1: keys.v1.map((k) => base64Encode(k)),
+    ch: keys.channelId,
+    author: keys.authorId,
+    kind: imageMimeFor(name) ? "image" : mime.startsWith("video/") ? "video" : "",
+    max,
+  };
+  let r: EngineOpen;
+  try {
+    try {
+      r = await call<EngineOpen>("openFile", { ...args, url });
+    } catch (e) {
+      if (!String((e as any)?.message).startsWith("fetch")) throw e;
+      r = await call<EngineOpen>("openFile", { ...args, data: base64Encode(await readUri(url, max)) });
+    }
+  } catch (e) {
+    const msg = String((e as any)?.message ?? e);
+    if (msg === "file too large") throw e;
+    diag.engineFallbacks++;
+    diag.engineLastError = msg.slice(0, 80);
+    return undefined;
+  }
+  diag.engineJobs++;
+  if (!r) throw new Error("wrong key or corrupted file");
+  let uri: string;
+  try {
+    const file = `${a.id}.${extOf(name) || "bin"}`;
+    uri = await writeCacheFileBase64(file, r.data);
+    written.push(file);
+  } catch (e) {
+    if (!imageMimeFor(name) || r.size > 2 * 1024 * 1024) throw e;
+    uri = `data:${mime};base64,${r.data}`;
+  }
+  return { uri, name, mime, size: r.size, w: r.w, h: r.h };
+}
+
 async function decryptOne(a: any, keys: Keys, size: { w: number; h: number } | null): Promise<Decrypted> {
-  const blob = await readUri(rawCdnUrl(String(a.url ?? a.proxy_url)), MAX_FILE_BYTES + 64 * 1024);
+  const url = rawCdnUrl(String(a.url ?? a.proxy_url));
+  const fast = await decryptInEngine(a, keys, url, originalFileName(String(a.filename)), mimeFor(originalFileName(String(a.filename))));
+  if (fast) return { ...fast, w: fast.w ?? size?.w, h: fast.h ?? size?.h };
+  const blob = await readUri(url, MAX_FILE_BYTES + 64 * 1024);
   const plain = openFile(blob, keys);
   if (!plain) throw new Error("wrong key or corrupted file");
   const name = originalFileName(String(a.filename));
