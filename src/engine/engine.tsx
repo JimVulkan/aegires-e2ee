@@ -17,7 +17,7 @@
 // it can be found); the first mounted host is active. Every caller must work without the engine:
 // `call` rejects when there is none, and callers fall back to the JS code.
 import { eachExport, findComponent, findExportedComponent, findModuleWhere, findWithLoaders, instead } from "../patch.ts";
-import { React, RN } from "../rt.ts";
+import { React, RN, comp } from "../rt.ts";
 import { diag } from "../diag.ts";
 
 declare const __ENGINE_PAGE__: string;
@@ -258,9 +258,32 @@ function finish(j: Job): void {
   }
 }
 
+let broken = ""; // set when rendering the WebView crashed: the engine stays off until reload
+
 export function engineReady(): boolean {
-  return !!rerender && !!found;
+  return !!rerender && !!found && !broken;
 }
+
+const typeName = (c: any) => (typeof c === "string" ? `"${c}"` : typeof c);
+
+/** Keeps a crash in the engine's views away from the screen that hosts it. */
+const Guard: any =
+  typeof React.Component === "function"
+    ? class extends React.Component<any, { failed: boolean }> {
+        state = { failed: false };
+        static getDerivedStateFromError() {
+          return { failed: true };
+        }
+        componentDidCatch(error: any) {
+          broken = String(error?.message ?? error).slice(0, 120);
+          diag.engine = `WebView crashed (view ${typeName(RN?.View)}, webview ${typeName(found?.comp)}): ${broken}`;
+          failAll("WebView crashed");
+        }
+        render() {
+          return this.state.failed ? null : this.props.children;
+        }
+      }
+    : null;
 
 /** Resolves true once a host with a WebView is mounted, false after `ms`. */
 export function waitEngine(ms: number): Promise<boolean> {
@@ -345,8 +368,15 @@ export function EngineHost(): any {
     rerender = () => setTick((n: number) => n + 1);
     hostWaiters.splice(0).forEach((f) => f(true));
   }, [active]);
-  if (!active || !found || !jobs.size) return null;
-  return React.createElement(RN.View, { style: HIDDEN, pointerEvents: "none" }, ...Array.from(jobs.values(), jobView));
+  if (!active || !found || broken || !jobs.size) return null;
+  const View = RN?.View ?? comp("View");
+  if (!Guard || !View || (typeof found.comp !== "string" && typeof found.comp !== "function" && typeof found.comp !== "object") || !found.comp) {
+    broken = `cannot render (guard ${typeof Guard}, view ${typeName(View)}, webview ${typeName(found.comp)})`;
+    diag.engine = "WebView " + broken;
+    failAll(broken);
+    return null;
+  }
+  return React.createElement(Guard, null, React.createElement(View, { style: HIDDEN, pointerEvents: "none" }, ...Array.from(jobs.values(), jobView)));
 }
 
 /**
@@ -361,6 +391,7 @@ export function mountChatHost(): () => void {
   if (!proto || typeof proto.render !== "function") throw new Error("chat input is not a class component");
   const un = instead("render", proto, (args, orig) => {
     const ret = orig(...args);
+    if (!React.Fragment || broken) return ret;
     try {
       return React.createElement(React.Fragment, null, ret, React.createElement(EngineHost, { key: "aegires-engine" }));
     } catch {
