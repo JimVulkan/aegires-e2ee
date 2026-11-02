@@ -288,6 +288,26 @@ function failAll(why: string): void {
   jobs.clear();
 }
 
+// Discord's WebView fork delivers page messages as a global device event (with the view's
+// webViewKey), not as the view's onMessage event.
+const DEVICE_MESSAGE_EVENT = "ReactNativeWebViewOnMessageWithWebViewKey";
+let deviceSub: any = null;
+
+function listenDeviceMessages(): void {
+  if (deviceSub) return;
+  const em: any = RN?.DeviceEventEmitter ?? findModuleWhere((m: any) => typeof m?.addListener === "function" && typeof m?.emit === "function" && typeof m?.listenerCount === "function");
+  try {
+    deviceSub = em?.addListener?.(DEVICE_MESSAGE_EVENT, (e: any) => {
+      const data = typeof e === "string" ? e : e?.data ?? e?.nativeEvent?.data;
+      noteEvent("device message" + (data == null ? " keys=" + Object.keys(e ?? {}).join("|") : ""), null);
+      onPageMessage({ nativeEvent: { data } });
+    });
+    diag.installed["webview device events"] = deviceSub ? "listening" : "no DeviceEventEmitter";
+  } catch (err) {
+    diag.installed["webview device events"] = "failed: " + String((err as any)?.message ?? err);
+  }
+}
+
 function onPageMessage(e: any): void {
   let msg: any;
   try {
@@ -479,6 +499,7 @@ function jobView(j: Job): any {
   const source = { html: j.html, baseUrl: "https://localhost/" }; // https origin: WebCrypto needs a secure context
   const props: any = { key: keyOf(j), style: { width: 1, height: 1, opacity: 0 } };
   if (kind.native) {
+    listenDeviceMessages();
     // Only props the native view declares (upstream v13 calls the source "newSource" on Fabric).
     const has = (k: string) => !kind.props || kind.props.has(k);
     if (has("source")) props.source = source;
@@ -638,6 +659,8 @@ export function mountChatHost(): () => void {
 
 export function stopEngine(): void {
   rerender = null;
+  try { deviceSub?.remove?.(); } catch {}
+  deviceSub = null;
   failAll("engine stopped");
   hostWaiters.splice(0).forEach((f) => f(false));
   // The registry guard stays: Discord may still register the native view after we did.
