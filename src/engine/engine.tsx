@@ -421,7 +421,7 @@ let rendererMod: any;
 // Injected into the engine page: reports what the page sees (bridge object, origin, globals) by
 // navigating to https://localhost/__aeg?<info>, which reaches us as the LoadingStart event's URL.
 const REPORT_JS = `(function(){var go=function(i){location.replace('https://localhost/__aeg?'+encodeURIComponent(i))};try{var w=window,r=w.ReactNativeWebView;var ks=Object.getOwnPropertyNames(w).filter(function(k){return /webview|native|bridge|android|discord|rnc|post/i.test(k)}).slice(0,12).join('|');
-var info='inject: rnwv='+(typeof r)+'/'+(r&&typeof r.postMessage)+' origin='+location.origin+' secure='+w.isSecureContext+' wasm='+(typeof WebAssembly)+' aeg='+(typeof w.__aegJob)+' keys='+ks;
+var info='inject: '+(navigator.userAgent.split(' ').filter(function(x){return x.indexOf('Chrome/')==0})[0]||'')+' rnwv='+(typeof r)+'/'+(r&&typeof r.postMessage)+' origin='+location.origin+' secure='+w.isSecureContext+' wasm='+(typeof WebAssembly)+' aeg='+(typeof w.__aegJob)+' keys='+ks;
 try{r&&r.postMessage(JSON.stringify({probe:'cmd inject'}))}catch(e){info+=' postErr='+e}
 setTimeout(function(){go(info)},300)}catch(e){go('inject err='+e)}})();true;`;
 

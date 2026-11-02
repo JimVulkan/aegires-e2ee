@@ -171,7 +171,8 @@ if (job?.report) {
   setTimeout(() => {
     const w: any = globalThis;
     const keys = Object.getOwnPropertyNames(w).filter((k) => /webview|native|bridge|android|discord|rnc|post/i.test(k)).slice(0, 12).join("|");
-    const info = `page: rnwv=${typeof w.ReactNativeWebView}/${typeof w.ReactNativeWebView?.postMessage} queued=${outbox.length} origin=${location.origin} secure=${w.isSecureContext} wasm=${typeof WebAssembly} subtle=${!!subtle} keys=${keys}`;
+    const ua = (/Chrome\/[\d.]+/.exec(navigator.userAgent) || [navigator.userAgent.slice(0, 40)])[0];
+    const info = `page: ${ua} rnwv=${typeof w.ReactNativeWebView}/${typeof w.ReactNativeWebView?.postMessage} queued=${outbox.length} origin=${location.origin} secure=${w.isSecureContext} wasm=${typeof WebAssembly} subtle=${!!subtle} keys=${keys}`;
     location.replace("https://localhost/__aeg?" + encodeURIComponent(info));
   }, 2500);
 }
