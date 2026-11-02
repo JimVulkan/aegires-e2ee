@@ -657,6 +657,34 @@ export function mountChatHost(): () => void {
   };
 }
 
+/**
+ * Visible WebView for the video player: html loaded with a file:// base so it may read the
+ * decrypted file next to it. Container plus target (the target shows Discord's WebView);
+ * null without any WebView.
+ */
+export function viewerWebView(key: string, html: string, baseUrl: string, style: any): any[] | null {
+  const kind = findWebView();
+  if (!kind) return null;
+  const source = { html, baseUrl };
+  if (!kind.native) {
+    return [React.createElement(kind.comp, { key, style, source, javaScriptEnabled: true, allowFileAccess: true, allowFileAccessFromFileURLs: true, mediaPlaybackRequiresUserAction: false, allowsFullscreenVideo: true, originWhitelist: ["*"] })];
+  }
+  const has = (k: string) => !kind.props || kind.props.has(k);
+  const props: any = { key, style };
+  for (const [k, v] of Object.entries({ source, javaScriptEnabled: true, webViewKey: key, allowFileAccess: true, allowFileAccessFromFileURLs: true, mediaPlaybackRequiresUserAction: false, allowsFullscreenVideo: true, domStorageEnabled: true })) {
+    if (has(k)) props[k] = v;
+  }
+  if (kind.startLoad) props[kind.startLoad] = (e: any) => approveLoad(null, e?.nativeEvent ?? e, "player ShouldStart");
+  const out = [React.createElement(kind.comp, props)];
+  const t = kind.target;
+  if (t && t.props.has("webViewKey") && props.webViewKey) out.push(React.createElement(t.name, { key: key + "-target", webViewKey: key, style }));
+  return out;
+}
+
+export function releaseViewer(key: string): void {
+  try { (globalThis as any).nativeModuleProxy?.RNCWebView?.releaseWebView?.(key); } catch {}
+}
+
 export function stopEngine(): void {
   rerender = null;
   try { deviceSub?.remove?.(); } catch {}

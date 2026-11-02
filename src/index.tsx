@@ -13,6 +13,7 @@ import { envSummary } from "./patch.ts";
 import { setArgon2Offload } from "./crypto/kdf2.ts";
 import { base64Decode, base64Encode } from "./crypto/base64.ts";
 import { call, mountChatHost, stopEngine, waitEngine } from "./engine/engine.tsx";
+import { installVideoPlayer } from "./patches/player.tsx";
 
 /** Argon2id in the WebView engine (WebAssembly); null means "use the JS code". */
 async function engineArgon2(p: Uint8Array, s: Uint8Array, t: number, m: number, len: number): Promise<Uint8Array | null> {
@@ -77,6 +78,7 @@ export default {
     safely("receive patch", installReceivePatch);
     safely("upload patch", installUploadPatch);
     safely("commands", installCommands);
+    safely("video player", installVideoPlayer);
     setArgon2Offload(engineArgon2);
     undo.push(() => {
       setArgon2Offload(null);
