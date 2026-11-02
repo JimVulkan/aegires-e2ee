@@ -146,8 +146,8 @@ async function handle(raw: unknown): Promise<void> {
 const onMessage = (e: any) => void handle(e?.data);
 document.addEventListener("message", onMessage as any); // Android WebView delivers here
 window.addEventListener("message", onMessage);
-send({ ready: true, caps: { wasm: typeof WebAssembly === "object", subtle: !!subtle } });
 const job = (globalThis as any).__aegJob;
+send({ ready: true, job: job?.id, caps: { wasm: typeof WebAssembly === "object", subtle: !!subtle } });
 if (job) void handle(JSON.stringify(job));
 
 // Test hook (Node): the same handlers without a WebView.

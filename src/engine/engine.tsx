@@ -28,9 +28,20 @@ declare const __ENGINE_PAGE__: string;
 const NATIVE_NAMES = ["RNCWebViewContainer", "RNCWebView"];
 let NATIVE = NATIVE_NAMES[0];
 
-type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any };
+type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any; loadTimer?: any; loaded?: boolean };
+
+/** A page that has not said a word after this long never loaded: turn the engine off. */
+const LOAD_TIMEOUT_MS = 10000;
+const MESSAGING_MODULE = "AegiresEngineMessaging";
 /** comp: component or native view name; props: the native view's prop names; msg: message event prop. */
-type WebViewKind = { comp: any; native: boolean; props?: Set<string> | null; msg?: string };
+type WebViewKind = {
+  comp: any;
+  native: boolean;
+  props?: Set<string> | null;
+  msg?: string; // message event prop
+  startLoad?: string; // "may I load this page?" event prop, if the view asks
+  target?: { name: string; props: Set<string> } | null;
+};
 
 let found: WebViewKind | null = null;
 let seq = 0;
@@ -39,7 +50,6 @@ const hosts: Array<(on: boolean) => void> = [];
 let rerender: (() => void) | null = null;
 let hostWaiters: Array<(ok: boolean) => void> = [];
 let unguard: (() => void) | null = null;
-let ours = false; // we registered the native view name
 
 /** The native view's config from UIManager (requireNativeComponent builds its view config from it). */
 function nativeConfig(name: string): any {
@@ -149,7 +159,53 @@ function probe(): string {
   return out.join("; ");
 }
 
-/** The bare native view, registered with a guard so Discord can still register it later. */
+const ourNames = new Set<string>(); // native view names we registered (Discord re-registering them is ignored)
+let registryMod: any = null;
+
+/** Registers a native view's config (from UIManager constants) with React Native; true if usable. */
+function registerView(name: string, cfg: any, report: string[]): boolean {
+  const registry = (registryMod ??= findModuleWhere((o) => typeof o.register === "function" && typeof o.get === "function" && !!o.customDirectEventTypes));
+  if (!registry) {
+    report.push("native: view registry not found");
+    return false;
+  }
+  try {
+    registry.get(name);
+    return true; // someone (Discord) already registered it: just use it
+  } catch {}
+  if (!unguard) {
+    try {
+      // Discord registering the same name later must not throw.
+      unguard = instead("register", registry, (args, orig) => (ourNames.has(args[0]) ? args[0] : orig(...args)));
+    } catch (e) {
+      report.push("native: cannot guard registry (" + String((e as any)?.message ?? e).slice(0, 30) + ")");
+      return false;
+    }
+  }
+  // View config built like requireNativeComponent does: every View attribute (style, layout)
+  // plus the view's own props, and its events.
+  const viewConfig = () => {
+    let base: any = {};
+    try { base = registry.get("RCTView")?.validAttributes ?? {}; } catch {}
+    const validAttributes: any = { ...base };
+    for (const k of Object.keys(cfg?.NativeProps ?? {})) validAttributes[k] = true;
+    return { uiViewClassName: name, validAttributes, directEventTypes: cfg?.directEventTypes ?? {}, bubblingEventTypes: cfg?.bubblingEventTypes ?? {} };
+  };
+  try {
+    registry.register(name, viewConfig);
+    ourNames.add(name);
+    registry.get(name); // build the view config now, so a failure cannot happen mid-render
+    return true;
+  } catch (e) {
+    report.push(`native ${name}: register failed (${String((e as any)?.message ?? e).slice(0, 40)})`);
+    return false;
+  }
+}
+
+const describeCfg = (name: string, cfg: any) =>
+  `${name} props[${Object.keys(cfg?.NativeProps ?? {}).join(",") || "?"}] events[${Object.keys({ ...(cfg?.directEventTypes ?? {}), ...(cfg?.bubblingEventTypes ?? {}) }).join(",")}] commands[${Object.keys(cfg?.Commands ?? {}).join(",")}]`;
+
+/** The bare native view (Discord's container, or upstream RNCWebView), registered with a guard. */
 function nativeWebView(report: string[]): WebViewKind | null {
   const name = NATIVE_NAMES.find((n) => nativeConfig(n));
   if (!name) {
@@ -158,51 +214,19 @@ function nativeWebView(report: string[]): WebViewKind | null {
   }
   NATIVE = name;
   const cfg = nativeConfig(name);
-  const propNames = cfg?.NativeProps && typeof cfg.NativeProps === "object" ? new Set(Object.keys(cfg.NativeProps)) : null;
-  const events = { ...(cfg?.directEventTypes ?? {}), ...(cfg?.bubblingEventTypes ?? {}) };
-  const msgEntry: any = events.topMessage;
-  const msg = msgEntry?.registrationName ?? msgEntry?.phasedRegistrationNames?.bubbled ?? "onMessage";
-  diag.installed["webview config"] = `${name} props[${propNames ? Array.from(propNames).join(",") : "?"}] events[${Object.keys(events).join(",")}] commands[${Object.keys(cfg?.Commands ?? {}).join(",")}]`;
-  const registry = findModuleWhere((o) => typeof o.register === "function" && typeof o.get === "function" && !!o.customDirectEventTypes);
-  if (!registry) {
-    report.push("native: view registry not found");
-    return null;
-  }
-  let registered = false;
-  try {
-    registry.get(NATIVE);
-    registered = true; // someone (Discord) already registered it: just use it
-  } catch {}
-  // View config built like requireNativeComponent does, from the native config: every View
-  // attribute (style, layout) plus the view's own props, and its events.
-  const viewConfig = () => {
-    let base: any = {};
-    try { base = registry.get("RCTView")?.validAttributes ?? {}; } catch {}
-    const validAttributes: any = { ...base };
-    for (const k of Object.keys(cfg?.NativeProps ?? {})) validAttributes[k] = true;
-    return { uiViewClassName: NATIVE, validAttributes, directEventTypes: cfg?.directEventTypes ?? {}, bubblingEventTypes: cfg?.bubblingEventTypes ?? {} };
-  };
-  if (!registered) {
-    if (!unguard) {
-      try {
-        // Discord registering the same name later must not throw.
-        unguard = instead("register", registry, (args, orig) => (args[0] === NATIVE && ours ? args[0] : orig(...args)));
-      } catch (e) {
-        report.push("native: cannot guard registry (" + String((e as any)?.message ?? e).slice(0, 30) + ")");
-        return null;
-      }
-    }
-    try {
-      registry.register(NATIVE, viewConfig);
-      ours = true;
-      registry.get(NATIVE); // build the view config now, so a failure cannot happen mid-render
-    } catch (e) {
-      report.push("native: register failed (" + String((e as any)?.message ?? e).slice(0, 40) + ")");
-      return null;
-    }
-  }
-  report.push("native " + NATIVE + ": " + (ours ? "registered by us" : "already registered"));
-  return { comp: NATIVE, native: true, props: propNames, msg }; // a host component is just its name
+  const propNames = cfg?.NativeProps && typeof cfg.NativeProps === "object" ? new Set<string>(Object.keys(cfg.NativeProps)) : null;
+  const events: any = { ...(cfg?.directEventTypes ?? {}), ...(cfg?.bubblingEventTypes ?? {}) };
+  const reg = (e: any) => e?.registrationName ?? e?.phasedRegistrationNames?.bubbled;
+  const msg = reg(events.topMessage) ?? "onMessage";
+  const startLoad = reg(events.topShouldStartLoadWithRequest);
+  // Discord's container is shown on screen by an RNCWebViewTarget with the same key; render a
+  // hidden one too in case the container only starts its WebView once it is targeted.
+  const tcfg = name === "RNCWebViewContainer" ? nativeConfig("RNCWebViewTarget") : null;
+  diag.installed["webview config"] = describeCfg(name, cfg) + (tcfg ? "; " + describeCfg("RNCWebViewTarget", tcfg) : "");
+  if (!registerView(name, cfg, report)) return null;
+  const target = tcfg && registerView("RNCWebViewTarget", tcfg, report) ? { name: "RNCWebViewTarget", props: new Set<string>(Object.keys(tcfg.NativeProps ?? {})) } : null;
+  report.push(`native ${name}: ready` + (target ? " (+ target)" : ""));
+  return { comp: name, native: true, props: propNames, msg, startLoad, target }; // a host component is just its name
 }
 
 function findWebView(): WebViewKind | null {
@@ -225,6 +249,7 @@ function findWebView(): WebViewKind | null {
 function failAll(why: string): void {
   for (const j of jobs.values()) {
     clearTimeout(j.timer);
+    clearTimeout(j.loadTimer);
     j.reject(new Error(why));
   }
   jobs.clear();
@@ -237,7 +262,12 @@ function onPageMessage(e: any): void {
   } catch {
     return;
   }
-  if (msg?.caps) diag.engine = `${found?.native ? "native WebView" : "WebView component"} (${msg.caps.wasm ? "WebAssembly" : "no WebAssembly"}, ${msg.caps.subtle ? "WebCrypto" : "no WebCrypto"})`;
+  if (msg?.caps) {
+    diag.engine = `${found?.native ? "native WebView" : "WebView component"} (${msg.caps.wasm ? "WebAssembly" : "no WebAssembly"}, ${msg.caps.subtle ? "WebCrypto" : "no WebCrypto"})`;
+    const lj = jobs.get(msg.job);
+    if (lj) lj.loaded = true;
+    return;
+  }
   const j = jobs.get(msg?.id);
   if (!j) return;
   finish(j);
@@ -250,6 +280,7 @@ const keyOf = (j: Job) => "aegires-engine-" + j.id;
 function finish(j: Job): void {
   jobs.delete(j.id);
   clearTimeout(j.timer);
+  clearTimeout(j.loadTimer);
   rerender?.();
   if (found?.native && found.props?.has("webViewKey")) {
     setTimeout(() => {
@@ -314,7 +345,15 @@ export function call<T = any>(op: string, args: Record<string, unknown>, timeout
       if (j) finish(j);
       reject(new Error("engine timeout"));
     }, timeoutMs);
-    jobs.set(id, { id, html: pageHtml({ ...args, id, op }), resolve, reject, timer });
+    const job: Job = { id, html: pageHtml({ ...args, id, op }), resolve, reject, timer };
+    job.loadTimer = setTimeout(() => {
+      if (job.loaded || !jobs.has(id)) return;
+      broken = `page never loaded in ${LOAD_TIMEOUT_MS / 1000} s`;
+      diag.engine = `${found?.native ? "native WebView" : "WebView component"}: ${broken} (sent ${diag.installed["webview sent"] ?? "?"})`;
+      failAll(broken);
+      rerender?.();
+    }, LOAD_TIMEOUT_MS);
+    jobs.set(id, job);
     rerender?.();
   });
 }
@@ -333,12 +372,46 @@ function jobView(j: Job): any {
     if (has("messagingEnabled")) props.messagingEnabled = true;
     if (has("javaScriptEnabled")) props.javaScriptEnabled = true;
     if (has("webViewKey")) props.webViewKey = keyOf(j);
+    // Upstream Android can deliver messages through a named JS module instead of the event.
+    if (kind.props?.has("messagingModuleName") && registerMessaging()) props.messagingModuleName = MESSAGING_MODULE;
     props[kind.msg ?? "onMessage"] = onPageMessage;
+    diag.installed["webview sent"] = Object.keys(props).filter((k) => k !== "key" && k !== "style").join(",");
   } else {
     Object.assign(props, { source, javaScriptEnabled: true, originWhitelist: ["*"], onMessage: onPageMessage });
     props.onError = () => j.reject(new Error("WebView failed to load"));
   }
-  return React.createElement(kind.comp, props);
+  const view = React.createElement(kind.comp, props);
+  const t = kind.target;
+  if (!t || !t.props.has("webViewKey") || !props.webViewKey) return view;
+  const target = React.createElement(t.name, { key: "target" + j.id, webViewKey: props.webViewKey, style: { width: 1, height: 1, opacity: 0 } });
+  return [view, target];
+}
+
+let messagingRegistered = false;
+
+/** Registers MESSAGING_MODULE as a JS module the native WebView can call (onMessage, load approval). */
+function registerMessaging(): boolean {
+  if (messagingRegistered) return true;
+  const g: any = globalThis as any;
+  const approve = (e: any) => {
+    const ne = e?.nativeEvent ?? e;
+    try { g.nativeModuleProxy?.RNCWebView?.onShouldStartLoadWithRequestCallback?.(true, ne?.lockIdentifier); } catch {}
+  };
+  const mod = { onMessage: (e: any) => onPageMessage(e?.nativeEvent ? e : { nativeEvent: e }), onShouldStartLoadWithRequest: approve };
+  try {
+    if (typeof g.RN$registerCallableModule === "function") {
+      g.RN$registerCallableModule(MESSAGING_MODULE, () => mod); // bridgeless
+      messagingRegistered = true;
+    }
+  } catch {}
+  try {
+    const bridge = findModuleWhere((o) => typeof o.registerCallableModule === "function" && typeof o.callFunctionReturnFlushedQueue === "function");
+    if (bridge) {
+      bridge.registerCallableModule(MESSAGING_MODULE, mod);
+      messagingRegistered = true;
+    }
+  } catch {}
+  return messagingRegistered;
 }
 
 /** Invisible host for the job WebViews. Safe to mount anywhere, any number of times. */
