@@ -7,7 +7,9 @@
 //   Compression is only tried when the text is >= 100 bytes, and only kept if it is smaller.
 //
 // Attachments use a simpler framing (no flag byte, no compression): iv[12] || ct || tag[16].
-import { gcm } from "@noble/ciphers/aes";
+import { gcmOpen, gcmSeal } from "./aead.ts";
+
+const EMPTY = new Uint8Array(0);
 import { deflateSync, inflateSync } from "fflate";
 import { base64Decode, base64Encode } from "./base64.ts";
 import { randomBytes } from "./random.ts";
@@ -49,7 +51,7 @@ export function encryptText(plain: string, key: Uint8Array): string {
   }
   const payload = concat(Uint8Array.of(flag), data);
   const iv = randomBytes(IV_LEN);
-  const sealed = gcm(key, iv).encrypt(payload); // ciphertext || 16-byte tag
+  const sealed = gcmSeal(key, iv, EMPTY, payload, TAG_LEN); // ciphertext || 16-byte tag
   return PREFIX + base64Encode(concat(iv, sealed));
 }
 
@@ -59,8 +61,8 @@ export function decryptText(wire: string, key: Uint8Array): string | null {
   try {
     const all = base64Decode(wire.slice(PREFIX.length));
     if (!all || all.length < IV_LEN + TAG_LEN) return null;
-    const payload = gcm(key, all.subarray(0, IV_LEN)).decrypt(all.subarray(IV_LEN));
-    if (payload.length === 0) return null;
+    const payload = gcmOpen(key, all.subarray(0, IV_LEN), EMPTY, all.subarray(IV_LEN), TAG_LEN);
+    if (!payload || payload.length === 0) return null;
     const data = payload.subarray(1);
     // Aegires treats every flag other than 1 as "raw"; mirror that exactly.
     if (payload[0] === FLAG_DEFLATE) {
@@ -76,14 +78,10 @@ export function decryptText(wire: string, key: Uint8Array): string | null {
 /** Attachment framing: iv[12] || AES-256-GCM(bytes) || tag[16]. */
 export function encryptBytes(plain: Uint8Array, key: Uint8Array): Uint8Array {
   const iv = randomBytes(IV_LEN);
-  return concat(iv, gcm(key, iv).encrypt(plain));
+  return concat(iv, gcmSeal(key, iv, EMPTY, plain, TAG_LEN));
 }
 
 export function decryptBytes(blob: Uint8Array, key: Uint8Array): Uint8Array | null {
   if (blob.length < IV_LEN + TAG_LEN) return null;
-  try {
-    return gcm(key, blob.subarray(0, IV_LEN)).decrypt(blob.subarray(IV_LEN));
-  } catch {
-    return null;
-  }
+  return gcmOpen(key, blob.subarray(0, IV_LEN), EMPTY, blob.subarray(IV_LEN), TAG_LEN);
 }

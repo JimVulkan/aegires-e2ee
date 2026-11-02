@@ -1,21 +1,16 @@
 // AES-GCM with a configurable tag length (Aegires v2 uses 12/14/16-byte tags) and 128/192/256-bit
-// keys. @noble/ciphers only produces full 16-byte tags, but a GCM tag of length t is simply the first
-// t bytes of the full tag.
+// keys. A GCM tag of length t is simply the first t bytes of the full tag.
 //
-//   seal: encrypt normally, cut the tag down.
-//   open: verify FIRST, then decrypt. The tag is computed directly as
-//           T = E(K, J0) xor GHASH_H(aad || ct || lengths),  H = E(K, 0^128), J0 = nonce || 00000001
-//         and compared in constant time; only then is the ciphertext CTR-decrypted from counter 2.
+//   T = E(K, J0) xor GHASH_H(aad || ct || lengths),  H = E(K, 0^128), J0 = nonce || 00000001,
+//   ct = AES-CTR from counter 2.
+//
+//   seal: CTR-encrypt, then compute the tag and cut it down.
+//   open: verify FIRST (tag over the ciphertext, constant-time compare), only then CTR-decrypt.
 //         (Upstream decrypted with CTR and then re-ran a full GCM encryption to recompute the tag:
 //         twice the AES work, and it produced plaintext before authenticating.)
-import { ctr, ecb, gcm } from "@noble/ciphers/aes";
+// AES-CTR is our flat Hermes-friendly one (aesfast.ts); GHASH is @noble/ciphers'.
 import { ghash } from "@noble/ciphers/_polyval";
-
-export function gcmSeal(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, plain: Uint8Array, tagLen: number): Uint8Array {
-  if (nonce.length !== 12) throw new Error("nonce must be 12 bytes");
-  const sealed = gcm(key, nonce, aad).encrypt(plain); // ct || 16-byte tag
-  return sealed.slice(0, plain.length + tagLen);
-}
+import { ctr32, expandKey } from "./aesfast.ts";
 
 function lengthsBlock(aadLen: number, ctLen: number): Uint8Array {
   const b = new Uint8Array(16);
@@ -31,14 +26,13 @@ function lengthsBlock(aadLen: number, ctLen: number): Uint8Array {
   return b;
 }
 
-/** Full 16-byte GCM tag of (aad, ct) without touching the plaintext. */
-function gcmTag(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ct: Uint8Array): Uint8Array {
-  const block = ecb(key, { disablePadding: true });
-  const h = block.encrypt(new Uint8Array(16));
-  const j0 = new Uint8Array(16);
-  j0.set(nonce, 0);
-  j0[15] = 1;
-  const ej0 = ecb(key, { disablePadding: true }).encrypt(j0);
+/** Full 16-byte GCM tag of (aad, ct). */
+function gcmTag(rk: Uint32Array, nonce: Uint8Array, aad: Uint8Array, ct: Uint8Array): Uint8Array {
+  const zero = new Uint8Array(16);
+  const h = new Uint8Array(16);
+  ctr32(rk, zero, 0, zero, h); // E(K, 0^128)
+  const ej0 = new Uint8Array(16);
+  ctr32(rk, nonce, 1, zero, ej0);
   const g = ghash.create(h, aad.length + ct.length);
   if (aad.length) g.update(aad);
   if (ct.length) g.update(ct);
@@ -48,20 +42,31 @@ function gcmTag(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ct: Uint8Ar
   return s;
 }
 
+export function gcmSeal(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, plain: Uint8Array, tagLen: number): Uint8Array {
+  if (nonce.length !== 12) throw new Error("nonce must be 12 bytes");
+  if (tagLen < 12 || tagLen > 16) throw new Error("bad tag length");
+  const rk = expandKey(key);
+  const out = new Uint8Array(plain.length + tagLen);
+  const ct = out.subarray(0, plain.length);
+  ctr32(rk, nonce, 2, plain, ct);
+  out.set(gcmTag(rk, nonce, aad, ct).subarray(0, tagLen), plain.length);
+  return out;
+}
+
 /** Returns the plaintext, or null if authentication fails. Never throws. */
 export function gcmOpen(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, data: Uint8Array, tagLen: number): Uint8Array | null {
   try {
     if (nonce.length !== 12 || data.length < tagLen || tagLen < 12 || tagLen > 16) return null;
+    const rk = expandKey(key);
     const ct = data.subarray(0, data.length - tagLen);
     const tag = data.subarray(data.length - tagLen);
-    const want = gcmTag(key, nonce, aad, ct);
+    const want = gcmTag(rk, nonce, aad, ct);
     let diff = 0;
     for (let i = 0; i < tagLen; i++) diff |= want[i] ^ tag[i];
     if (diff !== 0) return null;
-    const counter = new Uint8Array(16);
-    counter.set(nonce, 0);
-    counter[15] = 2;
-    return ct.length ? ctr(key, counter).decrypt(ct) : new Uint8Array(0);
+    const out = new Uint8Array(ct.length);
+    ctr32(rk, nonce, 2, ct, out);
+    return out;
   } catch {
     return null;
   }

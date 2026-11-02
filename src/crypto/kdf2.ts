@@ -35,15 +35,13 @@ export type KdfOptions = {
 export async function deriveMasterKey(password: string, opts: KdfOptions = {}): Promise<Uint8Array> {
   if (!password) throw new Error("empty password");
   const salt = utf8Encode(opts.context === undefined ? USER_KEY_SALT : "dcenc2|ctx|" + opts.context);
-  // Lazy import: Argon2/BLAKE2b use BigInt at module load. Loading them only when a key is derived
-  // means a runtime without BigInt can still decrypt/encrypt with stored keys.
-  const { argon2idAsync } = await import("@noble/hashes/argon2");
-  return argon2idAsync(utf8Encode(normalize(password)), salt, {
+  // Lazy import: BLAKE2b (@noble/hashes) uses BigInt at module load. Loading it only when a key is
+  // derived means a runtime without BigInt can still decrypt/encrypt with stored keys.
+  const { argon2id } = await import("./argon2.ts");
+  return argon2id(utf8Encode(normalize(password)), salt, {
     t: ARGON_T,
     m: opts.memoryKiB ?? ARGON_M_KIB,
-    p: 1,
     dkLen: MASTER_LEN,
-    asyncTick: 10, // yield to the event loop every ~10 ms so Discord's UI stays alive
-    onProgress: opts.onProgress,
+    onProgress: opts.onProgress, // also yields to the event loop every ~100 ms so the UI stays alive
   });
 }
