@@ -44,8 +44,12 @@ let mode = 0;
 /** Load events seen from the native WebView, newest last (Diagnostics: webview events). */
 const seenEvents: string[] = [];
 function noteEvent(label: string, ne: any): void {
-  const extra = ne?.description ?? ne?.statusCode ?? (typeof ne?.progress === "number" ? Math.round(ne.progress * 100) + "%" : "");
-  seenEvents.push(label + (extra !== "" ? ":" + String(extra).slice(0, 40) : ""));
+  let extra = String(ne?.description ?? ne?.statusCode ?? (typeof ne?.progress === "number" ? Math.round(ne.progress * 100) + "%" : ""));
+  // The page reports through navigations to about:blank#<info> (seen here as the URL).
+  const url = typeof ne?.url === "string" ? ne.url : "";
+  if (url.includes("#")) extra += " " + decodeURIComponent(url.slice(url.indexOf("#") + 1)).slice(0, 160);
+  else if (url && /Start|Finish/.test(label)) extra += " " + url.slice(0, 24);
+  seenEvents.push(label + (extra.trim() ? ":" + extra.trim().slice(0, 180) : ""));
   if (seenEvents.length > 12) seenEvents.shift();
   diag.installed["webview events"] = `mode ${mode}: ` + seenEvents.join(", ");
 }
@@ -406,6 +410,13 @@ const HIDDEN = { position: "absolute", width: 1, height: 1, opacity: 0, left: -1
 
 let rendererMod: any;
 
+// Injected into the engine page: reports what the page sees (bridge object, origin, globals) by
+// navigating to about:blank#<info>, which reaches us as the LoadingStart event's URL.
+const REPORT_JS = `(function(){try{var w=window,r=w.ReactNativeWebView;var ks=Object.getOwnPropertyNames(w).filter(function(k){return /webview|native|bridge|android|discord|rnc|post/i.test(k)}).slice(0,12).join('|');
+var info='rnwv='+(typeof r)+'/'+(r&&typeof r.postMessage)+' origin='+location.origin+' secure='+w.isSecureContext+' wasm='+(typeof WebAssembly)+' aeg='+(typeof w.__aegJob)+' keys='+ks;
+try{r&&r.postMessage(JSON.stringify({probe:'cmd inject'}))}catch(e){info+=' postErr='+e}
+setTimeout(function(){location.replace('about:blank#'+encodeURIComponent(info))},300)}catch(e){location.replace('about:blank#err='+encodeURIComponent(String(e)))}})();true;`;
+
 /** Sends a command (loadUrl, injectJavaScript, ...) to the job's native view. */
 function command(j: Job, name: string, args: any[]): string {
   const g: any = globalThis as any;
@@ -444,7 +455,7 @@ function nudge(j: Job, step: number): void {
     } catch (e) {
       noteEvent("nativeInject threw " + String((e as any)?.message ?? e).slice(0, 40), null);
     }
-    noteEvent("cmd injectJavaScript " + command(j, "injectJavaScript", ["window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({probe:'cmd inject'}));true;"]), null);
+    noteEvent("cmd injectJavaScript " + command(j, "injectJavaScript", [REPORT_JS]), null);
     setTimeout(() => nudge(j, 1), 2500);
   } else if (step === 1) {
     const url = "data:text/html;base64," + base64Encode(utf8Encode(j.html));

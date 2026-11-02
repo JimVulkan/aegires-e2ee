@@ -19,8 +19,24 @@ import { decryptFileWith, encryptFileWith, presetFromIndex, type GcmBatch, type 
 import { imageDims, videoDims } from "../crypto/files.ts";
 import { randomBytes } from "../crypto/random.ts";
 
-const rn = (globalThis as any).ReactNativeWebView;
-const send = (o: unknown) => rn?.postMessage(JSON.stringify(o));
+// The native side may add window.ReactNativeWebView after this script starts: queue until it exists.
+const outbox: string[] = [];
+const bridge = () => (globalThis as any).ReactNativeWebView;
+const flush = () => {
+  const rn = bridge();
+  if (!rn?.postMessage) return false;
+  while (outbox.length) rn.postMessage(outbox.shift());
+  return true;
+};
+const send = (o: unknown) => {
+  outbox.push(JSON.stringify(o));
+  if (!flush()) {
+    let tries = 0;
+    const t = setInterval(() => {
+      if (flush() || ++tries > 100) clearInterval(t);
+    }, 50);
+  }
+};
 const subtle: any = (globalThis as any).crypto?.subtle;
 const b = (s: string): Uint8Array => {
   const r = base64Decode(String(s ?? ""));

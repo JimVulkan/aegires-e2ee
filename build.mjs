@@ -7,6 +7,7 @@
 // `vendetta.x.y` instead of bundling it, and (3) wrap the result in a function expression
 // that returns module.exports.
 import { build } from "esbuild";
+import { transformAsync } from "@babel/core";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
@@ -51,7 +52,19 @@ const result = await build({
   plugins: [vendettaGlobals],
 });
 
-const body = result.outputFiles[0].text;
+// Hermes as Discord runs it gives let/const in loops ONE binding for the whole loop (like var),
+// so closures created in a loop all see the last iteration's values. Discord's own bundle is
+// compiled with Babel's block-scoping transform; do the same for ours (it creates a fresh
+// binding per iteration where a closure needs one).
+const body = (
+  await transformAsync(result.outputFiles[0].text, {
+    babelrc: false,
+    configFile: false,
+    compact: false,
+    sourceType: "script",
+    plugins: ["@babel/plugin-transform-block-scoping"],
+  })
+).code;
 const code = `(function(){var module={exports:{}};var exports=module.exports;\n${body}\nreturn module.exports;})()\n`;
 
 const manifest = JSON.parse(await readFile("src/manifest.json", "utf8"));
