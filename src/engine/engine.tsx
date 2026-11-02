@@ -5,7 +5,7 @@
 // mounted by <EngineHost/> (in the plugin settings, and in the chat input when it can be found);
 // the first mounted host runs the engine, the others stand by. Every caller must still work
 // without it: `call` rejects when no engine is ready, and callers fall back to the JS code.
-import { findComponent, findExportedComponent, instead } from "../patch.ts";
+import { findComponent, findExportedComponent, findWithLoaders, instead } from "../patch.ts";
 import { React, RN } from "../rt.ts";
 import { diag } from "../diag.ts";
 
@@ -25,12 +25,14 @@ const hosts: Array<(on: boolean) => void> = [];
 // (Not via @vendetta/metro: its finders throw on some Kettu builds, see patch.ts.)
 function WebViewComponent(): any {
   if (webViewComp) return webViewComp;
+  const report: string[] = [];
   try {
     webViewComp = findExportedComponent("WebView") ?? findComponent("WebView") ?? null;
-  } catch {
-    webViewComp = null;
-  }
-  if (!webViewComp) diag.engine = "no WebView component loaded in Discord yet";
+    if (webViewComp) report.push("loaded modules: found");
+  } catch {}
+  if (!webViewComp) webViewComp = findWithLoaders("props", "WebView", report) ?? null;
+  diag.installed["webview lookup"] = report.join("; ") || "nothing to ask";
+  if (!webViewComp) diag.engine = "no WebView component found";
   return webViewComp;
 }
 
@@ -160,8 +162,9 @@ export function EngineHost(): any {
  * input. Throws if the chat input is not loaded yet (the installer retries).
  */
 export function mountChatHost(): () => void {
-  const ChatInput = findComponent("ChatInput");
-  if (!ChatInput) throw new Error("chat input not loaded yet - open a chat");
+  const report: string[] = [];
+  const ChatInput = findComponent("ChatInput") ?? findWithLoaders("name", "ChatInput", report);
+  if (!ChatInput) throw new Error("chat input not found (" + (report.join("; ") || "no loader finders") + ")");
   const proto = ChatInput.prototype;
   if (!proto || typeof proto.render !== "function") throw new Error("chat input is not a class component");
   const un = instead("render", proto, (args, orig) => {

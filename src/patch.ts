@@ -59,6 +59,31 @@ export function findExportedComponent(name: string): any {
   return scan((o) => isComponent(o[name]))?.[name];
 }
 
+/**
+ * Asks the loader's own finders (Kettu/Bunny keep a cache of which module exports what, so they
+ * can also load modules Discord has not loaded yet). Each attempt is guarded; `report` collects
+ * what every loader said, for the Diagnostics card.
+ */
+export function findWithLoaders(how: "props" | "name", name: string, report: string[]): any {
+  const g: any = globalThis as any;
+  const loaders: Array<[string, () => any]> = [["vendetta", () => g.vendetta?.metro], ["bunny", () => g.bunny?.metro], ["kettu", () => g.kettu?.metro]];
+  for (const [label, get] of loaders) {
+    let api: any;
+    try { api = get(); } catch {}
+    if (!api) continue;
+    const fn = how === "props" ? api.findByProps : api.findByName;
+    if (typeof fn !== "function") { report.push(`${label}: no find${how === "props" ? "ByProps" : "ByName"}`); continue; }
+    try {
+      const r = how === "props" ? fn(name)?.[name] : fn(name, true) ?? fn(name);
+      if (isComponent(r)) { report.push(`${label}: found`); return r; }
+      report.push(`${label}: not found`);
+    } catch (e) {
+      report.push(`${label}: threw ${String((e as any)?.message ?? e).slice(0, 40)}`);
+    }
+  }
+  return undefined;
+}
+
 /** Module whose given properties are all functions. */
 export function findFns(...names: string[]): any {
   const pred = (o: any) => names.every((n) => isFn(o, n));
