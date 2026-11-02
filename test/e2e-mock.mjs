@@ -287,8 +287,10 @@ remote.set(url2, ref2.encFile(big, master, ref2.PRESETS[2], CH2, FRIEND));
 FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "203", channel_id: CH2, author: { id: FRIEND }, content: "", attachments: [{ id: "900", filename: "clip.enc.mp4", url: url2 }] } });
 await tick();
 const v2att = dispatched.at(-1).message.attachments[0];
-assert.equal(v2att.filename, "clip.mp4");
-assert.equal(v2att.content_type, "video/mp4");
+// Shown as an image (thumbnail + tap opens our player): Discord's own player can't stream file://.
+assert.equal(v2att.filename, "clip.mp4.jpg");
+assert.equal(v2att.content_type, "image/jpeg");
+assert.ok(v2att.url.endsWith(".mp4"), "url still names the video file");
 assert.deepEqual(files.get(v2att.url.slice(7)), big);
 console.log("  ok  v2: incoming multi-chunk file (150 KB video) decrypted and shown");
 delete storage.channels[CH2];

@@ -66,6 +66,11 @@ function apply(a: any, d: Decrypted, size: { w: number; h: number } | null): voi
   } else if (d.mime.startsWith("video/")) {
     a.width = d.w ?? size?.w ?? a.width ?? 640;
     a.height = d.h ?? size?.h ?? a.height ?? 360;
+    // Discord's inline player streams only over http(s) (Cronet) and fails on file://. Shown as an
+    // image, the chat draws the video's thumbnail (the image loader reads local videos) and a tap
+    // opens the media viewer, where patches/player.tsx plays it in a WebView.
+    a.content_type = "image/jpeg";
+    a.filename = d.name + ".jpg";
   }
 }
 
