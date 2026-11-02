@@ -28,11 +28,25 @@ declare const __ENGINE_PAGE__: string;
 const NATIVE_NAMES = ["RNCWebViewContainer", "RNCWebView"];
 let NATIVE = NATIVE_NAMES[0];
 
-type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any; loadTimer?: any; loaded?: boolean };
+type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any; loadTimer?: any; loaded?: boolean; attempt?: number };
 
 /** A page that has not said a word after this long never loaded: turn the engine off. */
 const LOAD_TIMEOUT_MS = 10000;
 const MESSAGING_MODULE = "AegiresEngineMessaging";
+// Ways to get the page's messages back, tried in order until a page reports:
+//   0: the onMessage event (upstream Android without messagingModuleName)
+//   1: a JS module the native side calls (messagingModuleName; also as "RNCWebViewMessagingModule")
+const MODES = 2;
+let mode = 0;
+
+/** Load events seen from the native WebView, newest last (Diagnostics: webview events). */
+const seenEvents: string[] = [];
+function noteEvent(label: string, ne: any): void {
+  const extra = ne?.description ?? ne?.statusCode ?? (typeof ne?.progress === "number" ? Math.round(ne.progress * 100) + "%" : "");
+  seenEvents.push(label + (extra !== "" ? ":" + String(extra).slice(0, 40) : ""));
+  if (seenEvents.length > 12) seenEvents.shift();
+  diag.installed["webview events"] = `mode ${mode}: ` + seenEvents.join(", ");
+}
 /** comp: component or native view name; props: the native view's prop names; msg: message event prop. */
 type WebViewKind = {
   comp: any;
@@ -41,6 +55,7 @@ type WebViewKind = {
   msg?: string; // message event prop
   startLoad?: string; // "may I load this page?" event prop, if the view asks
   target?: { name: string; props: Set<string> } | null;
+  events?: Record<string, string>; // top event name -> prop name
 };
 
 let found: WebViewKind | null = null;
@@ -226,7 +241,9 @@ function nativeWebView(report: string[]): WebViewKind | null {
   if (!registerView(name, cfg, report)) return null;
   const target = tcfg && registerView("RNCWebViewTarget", tcfg, report) ? { name: "RNCWebViewTarget", props: new Set<string>(Object.keys(tcfg.NativeProps ?? {})) } : null;
   report.push(`native ${name}: ready` + (target ? " (+ target)" : ""));
-  return { comp: name, native: true, props: propNames, msg, startLoad, target }; // a host component is just its name
+  const evProps: Record<string, string> = {};
+  for (const k of Object.keys(events)) if (reg(events[k])) evProps[k] = reg(events[k]);
+  return { comp: name, native: true, props: propNames, msg, startLoad, target, events: evProps }; // a host component is just its name
 }
 
 function findWebView(): WebViewKind | null {
@@ -274,7 +291,7 @@ function onPageMessage(e: any): void {
   msg.ok ? j.resolve(msg.out) : j.reject(new Error(String(msg.err)));
 }
 
-const keyOf = (j: Job) => "aegires-engine-" + j.id;
+const keyOf = (j: Job) => `aegires-engine-${j.id}-${j.attempt ?? 0}`;
 
 /** Removes the job's WebView and frees the native instance (Discord's fork keeps them by key). */
 function finish(j: Job): void {
@@ -346,13 +363,23 @@ export function call<T = any>(op: string, args: Record<string, unknown>, timeout
       reject(new Error("engine timeout"));
     }, timeoutMs);
     const job: Job = { id, html: pageHtml({ ...args, id, op }), resolve, reject, timer };
-    job.loadTimer = setTimeout(() => {
+    const armLoadTimer = () => (job.loadTimer = setTimeout(() => {
       if (job.loaded || !jobs.has(id)) return;
+      if (found?.native && mode + 1 < MODES) {
+        // Try the next way of receiving messages: re-render the job under a fresh key.
+        mode++;
+        noteEvent("retry", null);
+        job.attempt = (job.attempt ?? 0) + 1;
+        rerender?.();
+        armLoadTimer();
+        return;
+      }
       broken = `page never loaded in ${LOAD_TIMEOUT_MS / 1000} s`;
       diag.engine = `${found?.native ? "native WebView" : "WebView component"}: ${broken} (sent ${diag.installed["webview sent"] ?? "?"})`;
       failAll(broken);
       rerender?.();
-    }, LOAD_TIMEOUT_MS);
+    }, LOAD_TIMEOUT_MS));
+    armLoadTimer();
     jobs.set(id, job);
     rerender?.();
   });
@@ -363,7 +390,7 @@ const HIDDEN = { position: "absolute", width: 1, height: 1, opacity: 0, left: -1
 function jobView(j: Job): any {
   const kind = found!;
   const source = { html: j.html, baseUrl: "https://localhost/" }; // https origin: WebCrypto needs a secure context
-  const props: any = { key: "job" + j.id, style: { width: 1, height: 1, opacity: 0 } };
+  const props: any = { key: keyOf(j), style: { width: 1, height: 1, opacity: 0 } };
   if (kind.native) {
     // Only props the native view declares (upstream v13 calls the source "newSource" on Fabric).
     const has = (k: string) => !kind.props || kind.props.has(k);
@@ -373,7 +400,10 @@ function jobView(j: Job): any {
     if (has("javaScriptEnabled")) props.javaScriptEnabled = true;
     if (has("webViewKey")) props.webViewKey = keyOf(j);
     // Upstream Android can deliver messages through a named JS module instead of the event.
-    if (kind.props?.has("messagingModuleName") && registerMessaging()) props.messagingModuleName = MESSAGING_MODULE;
+    if (mode === 1 && kind.props?.has("messagingModuleName") && registerMessaging()) props.messagingModuleName = MESSAGING_MODULE;
+    for (const [top, prop] of Object.entries(kind.events ?? {})) {
+      if (/^top(Loading|HttpError|RenderProcessGone)/.test(top)) props[prop] = (e: any) => noteEvent(top.slice(3), e?.nativeEvent);
+    }
     props[kind.msg ?? "onMessage"] = onPageMessage;
     diag.installed["webview sent"] = Object.keys(props).filter((k) => k !== "key" && k !== "style").join(",");
   } else {
@@ -383,7 +413,7 @@ function jobView(j: Job): any {
   const view = React.createElement(kind.comp, props);
   const t = kind.target;
   if (!t || !t.props.has("webViewKey") || !props.webViewKey) return view;
-  const target = React.createElement(t.name, { key: "target" + j.id, webViewKey: props.webViewKey, style: { width: 1, height: 1, opacity: 0 } });
+  const target = React.createElement(t.name, { key: "target-" + props.webViewKey, webViewKey: props.webViewKey, style: { width: 1, height: 1, opacity: 0 } });
   return [view, target];
 }
 
@@ -397,20 +427,31 @@ function registerMessaging(): boolean {
     const ne = e?.nativeEvent ?? e;
     try { g.nativeModuleProxy?.RNCWebView?.onShouldStartLoadWithRequestCallback?.(true, ne?.lockIdentifier); } catch {}
   };
-  const mod = { onMessage: (e: any) => onPageMessage(e?.nativeEvent ? e : { nativeEvent: e }), onShouldStartLoadWithRequest: approve };
-  try {
-    if (typeof g.RN$registerCallableModule === "function") {
-      g.RN$registerCallableModule(MESSAGING_MODULE, () => mod); // bridgeless
-      messagingRegistered = true;
-    }
-  } catch {}
-  try {
-    const bridge = findModuleWhere((o) => typeof o.registerCallableModule === "function" && typeof o.callFunctionReturnFlushedQueue === "function");
-    if (bridge) {
-      bridge.registerCallableModule(MESSAGING_MODULE, mod);
-      messagingRegistered = true;
-    }
-  } catch {}
+  const mod = {
+    onMessage: (e: any) => {
+      noteEvent("module message", null);
+      onPageMessage(e?.nativeEvent ? e : { nativeEvent: e });
+    },
+    onShouldStartLoadWithRequest: approve,
+  };
+  // Java calls a JS module by its interface name (RNCWebViewMessagingModule) or by the name we
+  // passed; register both. Discord's own WebView JS is not loaded (or it would have been found);
+  // if it loads later its registration replaces ours, which only affects our jobs.
+  for (const name of [MESSAGING_MODULE, "RNCWebViewMessagingModule"]) {
+    try {
+      if (typeof g.RN$registerCallableModule === "function") {
+        g.RN$registerCallableModule(name, () => mod); // bridgeless
+        messagingRegistered = true;
+      }
+    } catch {}
+    try {
+      const bridge = findModuleWhere((o) => typeof o.registerCallableModule === "function" && typeof o.callFunctionReturnFlushedQueue === "function");
+      if (bridge) {
+        bridge.registerCallableModule(name, mod);
+        messagingRegistered = true;
+      }
+    } catch {}
+  }
   return messagingRegistered;
 }
 
