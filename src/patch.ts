@@ -49,6 +49,22 @@ const isFn = (o: any, n: string) => typeof o[n] === "function";
 
 const isComponent = (c: any) => typeof c === "function" || (!!c && typeof c === "object" && !!c.$$typeof);
 
+/** Calls fn(export) for every loaded module export and its .default (for probes). */
+export function eachExport(fn: (o: any) => void): void {
+  const reg = registry();
+  if (!reg) return;
+  for (const id of Object.keys(reg)) {
+    try {
+      const m = reg[id];
+      if (!m?.isInitialized) continue;
+      const ex = m.publicModule?.exports;
+      if (ex == null) continue;
+      fn(ex);
+      if (typeof ex === "object" && ex.default != null && ex.default !== ex) fn(ex.default);
+    } catch {}
+  }
+}
+
 /** First loaded module export (or its .default) that satisfies pred. */
 export function findModuleWhere(pred: (o: any) => boolean): any {
   return scan(pred);

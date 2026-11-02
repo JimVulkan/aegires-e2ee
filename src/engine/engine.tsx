@@ -16,7 +16,7 @@
 // <EngineHost/> renders the job WebViews (in the plugin settings, and next to the chat input when
 // it can be found); the first mounted host is active. Every caller must work without the engine:
 // `call` rejects when there is none, and callers fall back to the JS code.
-import { findComponent, findExportedComponent, findModuleWhere, findWithLoaders, instead } from "../patch.ts";
+import { eachExport, findComponent, findExportedComponent, findModuleWhere, findWithLoaders, instead } from "../patch.ts";
 import { React, RN } from "../rt.ts";
 import { diag } from "../diag.ts";
 
@@ -73,6 +73,37 @@ function probe(): string {
     const tm = t(() => g.__turboModuleProxy?.(m));
     if (tm && tm !== "err") out.push("turbo " + m);
   }
+  // Fabric/bridgeless: the native component registry is the only reliable answer.
+  const hc = g.__nativeComponentRegistry__hasComponent;
+  out.push(`hasComponent ${typeof hc}` + (typeof hc === "function" ? ": " + ["RNCWebView", "RCTWebView", "WebView", "AndroidWebView"].map((n) => `${n}=${t(() => hc(n))}`).join(",") : ""));
+  for (const m of ["RNCWebViewModule", "RNCWebViewUtils", "RNCWebView"]) {
+    const nm = t(() => g.nativeModuleProxy?.[m]);
+    if (nm && nm !== "err") out.push("module " + m);
+  }
+  // Native component names Discord's loaded JS knows (host components are plain name strings),
+  // and exported names that mention web pages.
+  const comps = new Set<string>();
+  const keys = new Set<string>();
+  const WEBBY = /web|captcha|activit|embed|browser|iframe/i;
+  eachExport((o) => {
+    if (typeof o === "string") {
+      if (/^[A-Z][A-Za-z0-9]{3,40}$/.test(o) && WEBBY.test(o)) comps.add(o);
+      return;
+    }
+    if (typeof o !== "object" && typeof o !== "function") return;
+    let ks: string[] = [];
+    try { ks = Object.keys(o).slice(0, 200); } catch {}
+    for (const k of ks) {
+      if (!WEBBY.test(k)) continue;
+      keys.add(k);
+      try {
+        const v = o[k];
+        if (typeof v === "string" && /^[A-Z][A-Za-z0-9]{3,40}$/.test(v)) comps.add(v);
+      } catch {}
+    }
+  });
+  if (comps.size) out.push("component names: " + Array.from(comps).slice(0, 15).join(","));
+  if (keys.size) out.push("exports: " + Array.from(keys).slice(0, 25).join(","));
   out.push(`arch: ${g.nativeFabricUIManager ? "fabric" : "paper"}${g.RN$Bridgeless ? " bridgeless" : ""}`);
   return out.join("; ");
 }
