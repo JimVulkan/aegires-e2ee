@@ -49,6 +49,11 @@ const isFn = (o: any, n: string) => typeof o[n] === "function";
 
 const isComponent = (c: any) => typeof c === "function" || (!!c && typeof c === "object" && !!c.$$typeof);
 
+/** First loaded module export (or its .default) that satisfies pred. */
+export function findModuleWhere(pred: (o: any) => boolean): any {
+  return scan(pred);
+}
+
 /** Class or function component whose name / displayName is `name`. */
 export function findComponent(name: string): any {
   return scan((o) => typeof o === "function" && (o.displayName === name || o.name === name));

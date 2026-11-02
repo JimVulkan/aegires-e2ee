@@ -9,7 +9,8 @@
 //            AES-GCM runs on WebCrypto (native, hardware AES). WebCrypto has no AES-192, so those
 //            keys use our JS AES-GCM, which is JIT-compiled here.
 //
-// Messages are JSON strings; bytes are base64. Every request has an id that the reply echoes.
+// Requests are JSON (bytes as base64) with an id that the reply echoes. The plugin puts one request
+// in window.__aegJob before this script (one WebView per job); posted messages also work.
 import { argon2id as wasmArgon2id } from "hash-wasm";
 import { argon2id as jsArgon2id } from "../crypto/argon2.ts";
 import { gcmOpen, gcmSeal } from "../crypto/aead.ts";
@@ -146,6 +147,8 @@ const onMessage = (e: any) => void handle(e?.data);
 document.addEventListener("message", onMessage as any); // Android WebView delivers here
 window.addEventListener("message", onMessage);
 send({ ready: true, caps: { wasm: typeof WebAssembly === "object", subtle: !!subtle } });
+const job = (globalThis as any).__aegJob;
+if (job) void handle(JSON.stringify(job));
 
 // Test hook (Node): the same handlers without a WebView.
 (globalThis as any).__aegiresEngine = { handle: (m: any) => OPS[m.op](m) };

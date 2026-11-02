@@ -7,6 +7,7 @@ import { decryptBytes, encryptBytes } from "../src/crypto/wire.ts";
 import { base64Decode, base64Encode } from "../src/crypto/base64.ts";
 
 const posted = [];
+globalThis.__aegJob = { id: 99, op: "ping" };
 const listeners = [];
 globalThis.document = { addEventListener: (_t, f) => listeners.push(f) };
 globalThis.window = globalThis;
@@ -18,7 +19,9 @@ const E = globalThis.__aegiresEngine;
 assert.equal(posted[0].ready, true);
 assert.equal(posted[0].caps.wasm, true);
 assert.equal(posted[0].caps.subtle, true);
-console.log("  ok  page announces itself with WebAssembly + WebCrypto");
+await new Promise((r) => setTimeout(r, 10));
+assert.deepEqual(posted.find((m) => m.id === 99), { id: 99, ok: true, out: "pong" }, "job embedded in the page runs on load");
+console.log("  ok  page announces itself with WebAssembly + WebCrypto and runs its embedded job");
 
 const enc = (s) => new TextEncoder().encode(s);
 const out = await E.handle({ op: "argon2", p: base64Encode(enc("hunter22 pass")), s: base64Encode(enc("dcenc2|user-key|v1")), t: 3, m: 4096, len: 32 });
