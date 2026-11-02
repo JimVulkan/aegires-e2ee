@@ -19,6 +19,8 @@
 import { eachExport, findComponent, findExportedComponent, findModuleWhere, findWithLoaders, instead } from "../patch.ts";
 import { React, RN, comp } from "../rt.ts";
 import { diag } from "../diag.ts";
+import { base64Encode } from "../crypto/base64.ts";
+import { utf8Encode } from "../crypto/utf8.ts";
 
 declare const __ENGINE_PAGE__: string;
 
@@ -28,7 +30,7 @@ declare const __ENGINE_PAGE__: string;
 const NATIVE_NAMES = ["RNCWebViewContainer", "RNCWebView"];
 let NATIVE = NATIVE_NAMES[0];
 
-type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any; loadTimer?: any; loaded?: boolean; attempt?: number };
+type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any; loadTimer?: any; loaded?: boolean; attempt?: number; ref?: any; tag?: number; nudged?: string };
 
 /** A page that has not said a word after this long never loaded: turn the engine off. */
 const LOAD_TIMEOUT_MS = 10000;
@@ -279,6 +281,10 @@ function onPageMessage(e: any): void {
   } catch {
     return;
   }
+  if (msg?.probe) {
+    noteEvent("message from " + msg.probe, null);
+    return;
+  }
   if (msg?.caps) {
     diag.engine = `${found?.native ? "native WebView" : "WebView component"} (${msg.caps.wasm ? "WebAssembly" : "no WebAssembly"}, ${msg.caps.subtle ? "WebCrypto" : "no WebCrypto"})`;
     const lj = jobs.get(msg.job);
@@ -370,8 +376,11 @@ export function call<T = any>(op: string, args: Record<string, unknown>, timeout
         mode++;
         noteEvent("retry", null);
         job.attempt = (job.attempt ?? 0) + 1;
+        job.nudged = undefined;
+        job.ref = undefined;
         rerender?.();
         armLoadTimer();
+        armNudge();
         return;
       }
       broken = `page never loaded in ${LOAD_TIMEOUT_MS / 1000} s`;
@@ -380,12 +389,68 @@ export function call<T = any>(op: string, args: Record<string, unknown>, timeout
       rerender?.();
     }, LOAD_TIMEOUT_MS));
     armLoadTimer();
+    // No layout event (not mounted?) -> still try the commands after 3 s.
+    const armNudge = () => setTimeout(() => {
+      if (job.loaded || job.nudged || !jobs.has(id)) return;
+      job.nudged = "timer";
+      noteEvent("no layout" + (job.ref ? " (have ref)" : " (no ref)"), null);
+      nudge(job, 0);
+    }, 3000);
     jobs.set(id, job);
+    armNudge();
     rerender?.();
   });
 }
 
 const HIDDEN = { position: "absolute", width: 1, height: 1, opacity: 0, left: -10, top: -10 };
+
+let rendererMod: any;
+
+/** Sends a command (loadUrl, injectJavaScript, ...) to the job's native view. */
+function command(j: Job, name: string, args: any[]): string {
+  const g: any = globalThis as any;
+  rendererMod ??= findModuleWhere((o) => typeof o.dispatchCommand === "function" && typeof o.findNodeHandle === "function") ?? null;
+  const tries: Array<[string, () => void]> = [
+    ["renderer", () => rendererMod.dispatchCommand(j.ref, name, args)],
+    ["fabric", () => g.nativeFabricUIManager.dispatchCommand(j.ref?.__internalInstanceHandle?.stateNode?.node ?? j.ref?.node, name, args)],
+    ["uimanager", () => RN.UIManager.dispatchViewManagerCommand(j.tag ?? rendererMod?.findNodeHandle?.(j.ref), name, args)],
+  ];
+  const out: string[] = [];
+  for (const [label, f] of tries) {
+    try {
+      f();
+      return label;
+    } catch (e) {
+      out.push(label + " " + String((e as any)?.message ?? e).slice(0, 30));
+    }
+  }
+  return "failed (" + out.join("; ") + ")";
+}
+
+/**
+ * Discord's container may only load what it is told to with commands. If the page has not spoken
+ * yet: check the WebView exists (native inject by key), then inject the page, then load it as a
+ * data: URL (no WebCrypto there - opaque origin - but WebAssembly and the JIT still work).
+ */
+function nudge(j: Job, step: number): void {
+  if (j.loaded || !jobs.has(j.id) || !found?.native) return;
+  const g: any = globalThis as any;
+  const key = keyOf(j);
+  if (step === 0) {
+    try {
+      const r = g.nativeModuleProxy?.RNCWebView?.injectJavaScriptWithWebViewKey?.(key, "window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({probe:'native inject'}));true;");
+      noteEvent("nativeInject " + (r && typeof r.then === "function" ? "promise" : typeof r), null);
+      if (r && typeof r.then === "function") r.then((v: any) => noteEvent("nativeInject ok " + String(v).slice(0, 20), null), (e: any) => noteEvent("nativeInject rejected " + String(e?.message ?? e).slice(0, 40), null));
+    } catch (e) {
+      noteEvent("nativeInject threw " + String((e as any)?.message ?? e).slice(0, 40), null);
+    }
+    noteEvent("cmd injectJavaScript " + command(j, "injectJavaScript", ["window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({probe:'cmd inject'}));true;"]), null);
+    setTimeout(() => nudge(j, 1), 2500);
+  } else if (step === 1) {
+    const url = "data:text/html;base64," + base64Encode(utf8Encode(j.html));
+    noteEvent("cmd loadUrl " + command(j, "loadUrl", [url]), null);
+  }
+}
 
 function jobView(j: Job): any {
   const kind = found!;
@@ -404,6 +469,16 @@ function jobView(j: Job): any {
     for (const [top, prop] of Object.entries(kind.events ?? {})) {
       if (/^top(Loading|HttpError|RenderProcessGone)/.test(top)) props[prop] = (e: any) => noteEvent(top.slice(3), e?.nativeEvent);
     }
+    props.ref = (r: any) => {
+      if (r) j.ref = r;
+    };
+    props.onLayout = (e: any) => {
+      j.tag = e?.nativeEvent?.target ?? j.tag;
+      if (j.nudged) return;
+      j.nudged = "yes";
+      noteEvent(`layout ${Math.round(e?.nativeEvent?.layout?.width ?? -1)}x${Math.round(e?.nativeEvent?.layout?.height ?? -1)}`, null);
+      setTimeout(() => nudge(j, 0), 2000);
+    };
     props[kind.msg ?? "onMessage"] = onPageMessage;
     diag.installed["webview sent"] = Object.keys(props).filter((k) => k !== "key" && k !== "style").join(",");
   } else {
