@@ -49,6 +49,55 @@ const isFn = (o: any, n: string) => typeof o[n] === "function";
 
 const isComponent = (c: any) => typeof c === "function" || (!!c && typeof c === "object" && !!c.$$typeof);
 
+/**
+ * Calls cb once with the first module export (or .default) matching pred: right away if it is
+ * loaded, else the moment Discord initialises it (we wrap the factories of modules not loaded
+ * yet; Metro reads module.factory when it first requires a module). Returns an undo.
+ */
+export function whenModule(pred: (o: any) => boolean, cb: (o: any) => void): () => void {
+  const now = scan(pred);
+  if (now) {
+    cb(now);
+    return () => {};
+  }
+  const reg = registry();
+  if (!reg) throw new Error("no module registry");
+  const wrapped: Array<[any, any, any]> = []; // [entry, original factory, our wrapper]
+  let done = false;
+  const restore = () => {
+    done = true;
+    for (const [m, orig, ours] of wrapped.splice(0)) {
+      try { if (m.factory === ours) m.factory = orig; } catch {}
+    }
+  };
+  for (const id of Object.keys(reg)) {
+    try {
+      const m = reg[id];
+      if (!m || m.isInitialized || typeof m.factory !== "function") continue;
+      const orig = m.factory;
+      const ours = function (this: any, ...args: any[]) {
+        const r = orig.apply(this, args);
+        if (!done) {
+          try {
+            const ex = m.publicModule?.exports;
+            const hit = ex && (pred(ex) ? ex : ex.default && pred(ex.default) ? ex.default : null);
+            if (hit) {
+              restore();
+              cb(hit);
+            }
+          } catch (e) {
+            log("whenModule callback failed", e);
+          }
+        }
+        return r;
+      };
+      m.factory = ours;
+      wrapped.push([m, orig, ours]);
+    } catch {}
+  }
+  return restore;
+}
+
 /** Calls fn(export) for every loaded module export and its .default (for probes). */
 export function eachExport(fn: (o: any) => void): void {
   const reg = registry();

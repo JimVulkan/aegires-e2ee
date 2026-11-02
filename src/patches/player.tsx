@@ -3,7 +3,7 @@
 // one of them we show our own full-screen player instead: a WebView (Chrome's <video>) reading
 // the file next to its page.
 import { React, RN, comp } from "../rt.ts";
-import { findModuleWhere, instead } from "../patch.ts";
+import { findModuleWhere, instead, whenModule } from "../patch.ts";
 import { diag } from "../diag.ts";
 import { releaseViewer, viewerWebView } from "../engine/engine.tsx";
 
@@ -79,9 +79,26 @@ function openPlayer(uri: string): boolean {
   return true;
 }
 
+// Discord loads the media viewer module only when it is first opened, so we hook it the moment
+// it loads (before the tap that loaded it calls it).
 export function installVideoPlayer(): () => void {
-  const mod = findModuleWhere((m: any) => typeof m?.openMediaModal === "function");
-  if (!mod) throw new Error("openMediaModal not found");
+  let unpatch: (() => void) | null = null;
+  diag.installed["video player"] = "waiting for the media viewer to load";
+  const stop = whenModule((m: any) => typeof m?.openMediaModal === "function", (mod) => {
+    try {
+      unpatch = hookViewer(mod);
+      diag.installed["video player"] = "hooked";
+    } catch (e) {
+      diag.installed["video player"] = "hook failed: " + String((e as any)?.message ?? e).slice(0, 80);
+    }
+  });
+  return () => {
+    stop();
+    unpatch?.();
+  };
+}
+
+function hookViewer(mod: any): () => void {
   return instead("openMediaModal", mod, (args, orig) => {
     try {
       const uri = pickVideo(args);
