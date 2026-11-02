@@ -22,10 +22,15 @@ import { diag } from "../diag.ts";
 
 declare const __ENGINE_PAGE__: string;
 
-const NATIVE = "RNCWebView";
+// Discord's WebView is a fork: the WebView lives in a native RNCWebViewContainer, keyed by a
+// webViewKey (an RNCWebViewTarget shows it on screen; we never need to) and the RNCWebView native
+// module manages instances by key. Plain RNCWebView is upstream react-native-webview.
+const NATIVE_NAMES = ["RNCWebViewContainer", "RNCWebView"];
+let NATIVE = NATIVE_NAMES[0];
 
 type Job = { id: number; html: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: any };
-type WebViewKind = { comp: any; native: boolean };
+/** comp: component or native view name; props: the native view's prop names; msg: message event prop. */
+type WebViewKind = { comp: any; native: boolean; props?: Set<string> | null; msg?: string };
 
 let found: WebViewKind | null = null;
 let seq = 0;
@@ -36,15 +41,16 @@ let hostWaiters: Array<(ok: boolean) => void> = [];
 let unguard: (() => void) | null = null;
 let ours = false; // we registered the native view name
 
-function nativeViewExists(): boolean {
-  // requireNativeComponent builds the view config from exactly this, so it must be there.
+/** The native view's config from UIManager (requireNativeComponent builds its view config from it). */
+function nativeConfig(name: string): any {
   const ui = RN?.UIManager;
   try {
-    if (ui?.getViewManagerConfig?.(NATIVE)) return true;
-    ui?.getConstantsForViewManager?.(NATIVE); // lazily registered view managers load on request
-    return !!ui?.getViewManagerConfig?.(NATIVE);
+    const c = ui?.getViewManagerConfig?.(name);
+    if (c) return c;
+    ui?.getConstantsForViewManager?.(name); // lazily registered view managers load on request
+    return ui?.getViewManagerConfig?.(name) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -138,11 +144,19 @@ function probe(): string {
 }
 
 /** The bare native view, registered with a guard so Discord can still register it later. */
-function nativeWebView(report: string[]): any {
-  if (!nativeViewExists()) {
-    report.push("native " + NATIVE + ": no view config");
+function nativeWebView(report: string[]): WebViewKind | null {
+  const name = NATIVE_NAMES.find((n) => nativeConfig(n));
+  if (!name) {
+    report.push("native " + NATIVE_NAMES.join("/") + ": no view config");
     return null;
   }
+  NATIVE = name;
+  const cfg = nativeConfig(name);
+  const propNames = cfg?.NativeProps && typeof cfg.NativeProps === "object" ? new Set(Object.keys(cfg.NativeProps)) : null;
+  const events = { ...(cfg?.directEventTypes ?? {}), ...(cfg?.bubblingEventTypes ?? {}) };
+  const msgEntry: any = events.topMessage;
+  const msg = msgEntry?.registrationName ?? msgEntry?.phasedRegistrationNames?.bubbled ?? "onMessage";
+  diag.installed["webview config"] = `${name} props[${propNames ? Array.from(propNames).join(",") : "?"}] events[${Object.keys(events).join(",")}] commands[${Object.keys(cfg?.Commands ?? {}).join(",")}]`;
   const registry = findModuleWhere((o) => typeof o.register === "function" && typeof o.get === "function" && !!o.customDirectEventTypes);
   if (!registry) {
     report.push("native: view registry not found");
@@ -174,7 +188,7 @@ function nativeWebView(report: string[]): any {
     }
   }
   report.push("native " + NATIVE + ": " + (ours ? "registered by us" : "already registered"));
-  return NATIVE; // a host component is just its name
+  return { comp: NATIVE, native: true, props: propNames, msg }; // a host component is just its name
 }
 
 function findWebView(): WebViewKind | null {
@@ -187,10 +201,7 @@ function findWebView(): WebViewKind | null {
   } catch {}
   if (!comp) comp = findWithLoaders("props", "WebView", report) ?? null;
   if (comp) found = { comp, native: false };
-  else {
-    const n = nativeWebView(report);
-    if (n) found = { comp: n, native: true };
-  }
+  else found = nativeWebView(report);
   diag.installed["webview lookup"] = report.join("; ") || "nothing to ask";
   if (!found) diag.installed["webview probe"] = probe();
   diag.engine = found ? (found.native ? "native WebView" : "WebView component") + ", idle" : "no WebView available";
@@ -215,10 +226,22 @@ function onPageMessage(e: any): void {
   if (msg?.caps) diag.engine = `${found?.native ? "native WebView" : "WebView component"} (${msg.caps.wasm ? "WebAssembly" : "no WebAssembly"}, ${msg.caps.subtle ? "WebCrypto" : "no WebCrypto"})`;
   const j = jobs.get(msg?.id);
   if (!j) return;
+  finish(j);
+  msg.ok ? j.resolve(msg.out) : j.reject(new Error(String(msg.err)));
+}
+
+const keyOf = (j: Job) => "aegires-engine-" + j.id;
+
+/** Removes the job's WebView and frees the native instance (Discord's fork keeps them by key). */
+function finish(j: Job): void {
   jobs.delete(j.id);
   clearTimeout(j.timer);
   rerender?.();
-  msg.ok ? j.resolve(msg.out) : j.reject(new Error(String(msg.err)));
+  if (found?.native && found.props?.has("webViewKey")) {
+    setTimeout(() => {
+      try { (globalThis as any).nativeModuleProxy?.RNCWebView?.releaseWebView?.(keyOf(j)); } catch {}
+    }, 500);
+  }
 }
 
 export function engineReady(): boolean {
@@ -250,8 +273,8 @@ export function call<T = any>(op: string, args: Record<string, unknown>, timeout
   const id = ++seq;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      jobs.delete(id);
-      rerender?.();
+      const j = jobs.get(id);
+      if (j) finish(j);
       reject(new Error("engine timeout"));
     }, timeoutMs);
     jobs.set(id, { id, html: pageHtml({ ...args, id, op }), resolve, reject, timer });
@@ -263,16 +286,19 @@ const HIDDEN = { position: "absolute", width: 1, height: 1, opacity: 0, left: -1
 
 function jobView(j: Job): any {
   const kind = found!;
-  const props: any = {
-    key: "job" + j.id,
-    style: { width: 1, height: 1, opacity: 0 },
-    source: { html: j.html, baseUrl: "https://localhost/" }, // https origin: WebCrypto needs a secure context
-    javaScriptEnabled: true,
-    onMessage: onPageMessage,
-  };
-  if (kind.native) props.messagingEnabled = true;
-  else {
-    props.originWhitelist = ["*"];
+  const source = { html: j.html, baseUrl: "https://localhost/" }; // https origin: WebCrypto needs a secure context
+  const props: any = { key: "job" + j.id, style: { width: 1, height: 1, opacity: 0 } };
+  if (kind.native) {
+    // Only props the native view declares (upstream v13 calls the source "newSource" on Fabric).
+    const has = (k: string) => !kind.props || kind.props.has(k);
+    if (has("source")) props.source = source;
+    if (has("newSource")) props.newSource = source;
+    if (has("messagingEnabled")) props.messagingEnabled = true;
+    if (has("javaScriptEnabled")) props.javaScriptEnabled = true;
+    if (has("webViewKey")) props.webViewKey = keyOf(j);
+    props[kind.msg ?? "onMessage"] = onPageMessage;
+  } else {
+    Object.assign(props, { source, javaScriptEnabled: true, originWhitelist: ["*"], onMessage: onPageMessage });
     props.onError = () => j.reject(new Error("WebView failed to load"));
   }
   return React.createElement(kind.comp, props);
