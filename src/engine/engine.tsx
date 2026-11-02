@@ -38,17 +38,49 @@ let ours = false; // we registered the native view name
 
 function nativeViewExists(): boolean {
   // requireNativeComponent builds the view config from exactly this, so it must be there.
+  const ui = RN?.UIManager;
   try {
-    return !!RN?.UIManager?.getViewManagerConfig?.(NATIVE);
+    if (ui?.getViewManagerConfig?.(NATIVE)) return true;
+    ui?.getConstantsForViewManager?.(NATIVE); // lazily registered view managers load on request
+    return !!ui?.getViewManagerConfig?.(NATIVE);
   } catch {
     return false;
   }
 }
 
+/** Everything WebView-like this Discord exposes, for the Diagnostics card ("webview probe"). */
+function probe(): string {
+  const g: any = globalThis as any;
+  const ui = RN?.UIManager;
+  const out: string[] = [];
+  const t = (f: () => any) => { try { return f(); } catch (e) { return "err"; } };
+  for (const n of [NATIVE, "RCTWebView", "AndroidWebView", "DCDWebView", "WebView"]) {
+    const has = t(() => ui?.hasViewManagerConfig?.(n));
+    const cfg = t(() => !!ui?.getViewManagerConfig?.(n));
+    const fab = t(() => g.__nativeComponentRegistry__hasComponent?.(n));
+    if (has || cfg === true || fab) out.push(`${n}[has=${has} cfg=${cfg} fabric=${fab}]`);
+  }
+  const web = (keys: any) => (Array.isArray(keys) ? keys : []).filter((k: any) => /web/i.test(String(k)));
+  const names = [
+    ...web(t(() => ui?.ViewManagerNames)),
+    ...web(t(() => Object.keys(ui?.getConstants?.() ?? {}))),
+    ...web(t(() => RN?.NativeModules?.UIManager?.ViewManagerNames)),
+  ];
+  if (names.length) out.push("view managers: " + Array.from(new Set(names)).join(","));
+  const mods = web(t(() => Object.keys(RN?.NativeModules ?? {})));
+  if (mods.length) out.push("native modules: " + mods.join(","));
+  for (const m of ["RNCWebViewModule", "RNCWebView", "RNCWebViewUtils"]) {
+    const tm = t(() => g.__turboModuleProxy?.(m));
+    if (tm && tm !== "err") out.push("turbo " + m);
+  }
+  out.push(`arch: ${g.nativeFabricUIManager ? "fabric" : "paper"}${g.RN$Bridgeless ? " bridgeless" : ""}`);
+  return out.join("; ");
+}
+
 /** The bare native view, registered with a guard so Discord can still register it later. */
 function nativeWebView(report: string[]): any {
   if (!nativeViewExists()) {
-    report.push("native " + NATIVE + ": not in this Discord");
+    report.push("native " + NATIVE + ": no view config");
     return null;
   }
   const registry = findModuleWhere((o) => typeof o.register === "function" && typeof o.get === "function" && !!o.customDirectEventTypes);
@@ -100,6 +132,7 @@ function findWebView(): WebViewKind | null {
     if (n) found = { comp: n, native: true };
   }
   diag.installed["webview lookup"] = report.join("; ") || "nothing to ask";
+  if (!found) diag.installed["webview probe"] = probe();
   diag.engine = found ? (found.native ? "native WebView" : "WebView component") + ", idle" : "no WebView available";
   return found;
 }
