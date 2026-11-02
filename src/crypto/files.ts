@@ -174,3 +174,44 @@ export function imageDims(b: Uint8Array): { w: number; h: number } | null {
   } catch {}
   return null;
 }
+
+/**
+ * Display size of an MP4 / MOV video from the first video track's "tkhd" box (16.16 fixed-point
+ * width/height, swapped when the track matrix rotates by 90 degrees). Null if not found.
+ */
+export function videoDims(b: Uint8Array): { w: number; h: number } | null {
+  const CONTAINERS = new Set(["moov", "trak"]);
+  const walk = (start: number, end: number, depth: number): { w: number; h: number } | null => {
+    let i = start;
+    while (i + 8 <= end && depth < 6) {
+      let size = u32be(b, i);
+      const type = ascii(b, i + 4, 4);
+      let header = 8;
+      if (size === 1 && i + 16 <= end) { size = u32be(b, i + 8) * 0x100000000 + u32be(b, i + 12); header = 16; }
+      else if (size === 0) size = end - i;
+      if (size < header || i + size > end) return null;
+      if (type === "tkhd") {
+        const v = b[i + header];
+        const body = i + header + 4 + (v === 1 ? 32 : 20) + 8 + 8; // matrix: after flags, times/ids, reserved, layer..volume+reserved
+        if (body + 36 + 8 <= i + size) {
+          const w = u32be(b, body + 36) / 65536;
+          const h = u32be(b, body + 40) / 65536;
+          if (w > 0 && h > 0) {
+            const rotated = u32be(b, body) === 0 && u32be(b, body + 4) !== 0; // matrix a = 0, b != 0
+            return rotated ? { w: Math.round(h), h: Math.round(w) } : { w: Math.round(w), h: Math.round(h) };
+          }
+        }
+      } else if (CONTAINERS.has(type)) {
+        const r = walk(i + header, i + size, depth + 1);
+        if (r) return r;
+      }
+      i += size;
+    }
+    return null;
+  };
+  try {
+    return walk(0, b.length, 0);
+  } catch {
+    return null;
+  }
+}
