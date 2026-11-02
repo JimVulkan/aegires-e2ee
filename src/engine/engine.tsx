@@ -48,10 +48,16 @@ function nativeConfig(name: string): any {
     const c = ui?.getViewManagerConfig?.(name);
     if (c) return c;
     ui?.getConstantsForViewManager?.(name); // lazily registered view managers load on request
-    return ui?.getViewManagerConfig?.(name) ?? null;
-  } catch {
-    return null;
-  }
+    const again = ui?.getViewManagerConfig?.(name);
+    if (again) return again;
+  } catch {}
+  // Bridgeless: getViewManagerConfig knows nothing about Fabric-only views, but the UIManager
+  // constants object (keyed by view name: APNGStickerView, DCDChatList, ...) still has them.
+  const hasCfg = (o: any) => !!o?.[name]?.NativeProps;
+  try {
+    if (hasCfg(ui)) return ui[name];
+  } catch {}
+  return findModuleWhere(hasCfg)?.[name] ?? null;
 }
 
 /** Everything WebView-like this Discord exposes, for the Diagnostics card ("webview probe"). */
@@ -167,6 +173,15 @@ function nativeWebView(report: string[]): WebViewKind | null {
     registry.get(NATIVE);
     registered = true; // someone (Discord) already registered it: just use it
   } catch {}
+  // View config built like requireNativeComponent does, from the native config: every View
+  // attribute (style, layout) plus the view's own props, and its events.
+  const viewConfig = () => {
+    let base: any = {};
+    try { base = registry.get("RCTView")?.validAttributes ?? {}; } catch {}
+    const validAttributes: any = { ...base };
+    for (const k of Object.keys(cfg?.NativeProps ?? {})) validAttributes[k] = true;
+    return { uiViewClassName: NATIVE, validAttributes, directEventTypes: cfg?.directEventTypes ?? {}, bubblingEventTypes: cfg?.bubblingEventTypes ?? {} };
+  };
   if (!registered) {
     if (!unguard) {
       try {
@@ -178,8 +193,7 @@ function nativeWebView(report: string[]): WebViewKind | null {
       }
     }
     try {
-      if (typeof RN.requireNativeComponent !== "function") throw new Error("no requireNativeComponent");
-      RN.requireNativeComponent(NATIVE);
+      registry.register(NATIVE, viewConfig);
       ours = true;
       registry.get(NATIVE); // build the view config now, so a failure cannot happen mid-render
     } catch (e) {
