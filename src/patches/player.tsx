@@ -6,6 +6,7 @@ import { React, RN, comp } from "../rt.ts";
 import { findModuleWhere, instead, whenModule } from "../patch.ts";
 import { diag } from "../diag.ts";
 import { releaseViewer, viewerWebView } from "../engine/engine.tsx";
+import { decryptedVideo } from "./media.ts";
 
 const VIDEO = /\.(mp4|m4v|mov|webm|mkv|3gp)$/i;
 const ALERT_KEY = "aegires-video-player";
@@ -108,6 +109,9 @@ export function installVideoPlayer(): () => void {
       note("hook failed: " + String((e as any)?.message ?? e).slice(0, 80));
     }
   });
+  // The native chat list (DCDChatList) reports taps through its onTap* props; wrap those where
+  // the element is created (jsx runtime / createElement).
+  const unChat = hookChatList();
   // Debug: log what the chat's image-tap handlers receive (the tap may never reach the viewer).
   const taps: Array<() => void> = [];
   for (const name of ["handleTapImage", "onTapImage"]) {
@@ -129,7 +133,67 @@ export function installVideoPlayer(): () => void {
     stop();
     unpatch?.();
     taps.splice(0).forEach((u) => u());
+    unChat();
   };
+}
+
+const CHAT_LIST = /ChatList$/;
+const loggedTaps = new Set<string>();
+
+/** Our video for a chat tap event: by any id in it, or message id + index. */
+function videoForTap(ne: any): string | null {
+  const direct = videosIn(ne)[0];
+  if (direct) return direct;
+  const ids: string[] = [];
+  const walk = (v: any, d: number) => {
+    if (v == null || d > 3) return;
+    if (typeof v === "string" || typeof v === "number") ids.push(String(v));
+    else if (typeof v === "object") for (const x of Object.values(v).slice(0, 40)) walk(x, d + 1);
+  };
+  walk(ne, 0);
+  const idx = Object.keys(ne ?? {}).find((k) => /index/i.test(k) && typeof ne[k] === "number");
+  return decryptedVideo(ids, ne?.messageId != null ? String(ne.messageId) : undefined, idx ? ne[idx] : undefined);
+}
+
+function wrapTaps(props: any): any {
+  let out = props;
+  for (const k of Object.keys(props)) {
+    if (!/^onTap/.test(k) || typeof props[k] !== "function" || props[k].__aeg) continue;
+    const orig = props[k];
+    const w = function (this: any, e: any, ...rest: any[]) {
+      const ne = e?.nativeEvent ?? e;
+      if (!loggedTaps.has(k)) {
+        loggedTaps.add(k);
+        console.log(`[aegires-e2ee] video player: chat ${k}`, shape(ne));
+      }
+      if (/Image|Media|Attachment|Video/i.test(k)) {
+        try {
+          const uri = videoForTap(ne);
+          if (uri && openPlayer(uri)) return;
+        } catch (err) {
+          note("tap failed: " + String((err as any)?.message ?? err).slice(0, 80));
+        }
+      }
+      return orig.call(this, e, ...rest);
+    };
+    (w as any).__aeg = true;
+    if (out === props) out = { ...props };
+    out[k] = w;
+  }
+  return out;
+}
+
+function hookChatList(): () => void {
+  const undo: Array<() => void> = [];
+  const wrapType = (type: any, props: any) => (typeof type === "string" && CHAT_LIST.test(type) && props ? wrapTaps(props) : props);
+  const rt = findModuleWhere((m: any) => typeof m?.jsx === "function" && typeof m?.jsxs === "function");
+  for (const fn of ["jsx", "jsxs", "jsxDEV"]) {
+    if (typeof rt?.[fn] !== "function") continue;
+    try { undo.push(instead(fn, rt, (args, orig) => orig(args[0], wrapType(args[0], args[1]), ...args.slice(2)))); } catch {}
+  }
+  try { undo.push(instead("createElement", React, (args, orig) => orig(args[0], wrapType(args[0], args[1]), ...args.slice(2)))); } catch {}
+  console.log("[aegires-e2ee] video player: chat list hooks", undo.length, "alerts", !!alerts());
+  return () => undo.splice(0).forEach((u) => u());
 }
 
 function hookViewer(mod: any): () => void {

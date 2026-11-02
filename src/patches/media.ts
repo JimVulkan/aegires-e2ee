@@ -24,6 +24,26 @@ interface Decrypted { uri: string; name: string; mime: string; size: number; w?:
 const done = new Map<string, Decrypted>(); // attachment id -> decrypted file
 const failed = new Set<string>(); // attachment ids that did not decrypt (no retry until reload)
 const queued = new Set<string>();
+const msgAtts = new Map<string, string[]>(); // message id -> its attachment ids (for tap events)
+
+/** Decrypted video file for a tapped attachment: by attachment id, or by message id + index. */
+export function decryptedVideo(ids: string[], messageId?: string, index?: number): string | null {
+  const isVideo = (d?: Decrypted) => !!d && d.mime.startsWith("video/");
+  for (const id of ids) {
+    const d = done.get(id);
+    if (isVideo(d)) return d!.uri;
+  }
+  const list = messageId ? msgAtts.get(messageId) : undefined;
+  if (list) {
+    const d = done.get(list[index ?? 0] ?? "");
+    if (isVideo(d)) return d!.uri;
+    if (index == null) {
+      const v = list.map((id) => done.get(id)).filter(isVideo);
+      if (v.length === 1) return v[0]!.uri;
+    }
+  }
+  return null;
+}
 const written: string[] = []; // cache file names, removed on unload
 
 let dispatch: ((e: any) => void) | null = null;
@@ -168,6 +188,7 @@ async function decryptOne(a: any, keys: Keys, size: { w: number; h: number } | n
 
 export function handleAttachments(m: any, channelId: string | undefined, size: { w: number; h: number } | null, authorId?: string): void {
   if (!storage.attachments) return;
+  if (m.id && Array.isArray(m.attachments)) msgAtts.set(String(m.id), m.attachments.map((a: any) => String(a?.id)));
   const pending: Array<Promise<void>> = [];
   for (const a of m.attachments) {
     if (!isEncAttachment(a)) continue;
@@ -218,6 +239,7 @@ export function clearMedia(): void {
   jobs.length = 0;
   removeCacheFiles(written.splice(0));
   done.clear();
+  msgAtts.clear();
   failed.clear();
   queued.clear();
 }
