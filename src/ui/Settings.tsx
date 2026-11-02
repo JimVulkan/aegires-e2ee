@@ -21,7 +21,7 @@ import { maxPlaintextBytes } from "../crypto/v2.ts";
 import { FORCED_CHANNELS } from "../forced.ts";
 import { getSelfId } from "../self.ts";
 import { measureKdf, runSelfTest } from "../selftest.ts";
-import { diagLines } from "../diag.ts";
+import { diag, diagLines } from "../diag.ts";
 import { EngineHost } from "../engine/engine.tsx";
 
 const View = comp("View");
@@ -225,8 +225,10 @@ function SettingsInner() {
           busy={busy}
           onPress={() =>
             run("Measure", async () => {
+              const jobs = diag.engineJobs;
               const ms = await measureKdf(onProgress);
-              setTestLines([`Argon2id 64 MiB took ${(ms / 1000).toFixed(1)} s on this phone`]);
+              const how = diag.engineJobs > jobs ? "in the WebView engine (WebAssembly)" : "in plain JS - engine: " + diag.engine + (diag.engineLastError ? ", last error: " + diag.engineLastError : "");
+              setTestLines([`Argon2id 64 MiB took ${(ms / 1000).toFixed(1)} s on this phone, ${how}`]);
             })
           }
         />
