@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node test/interop.mjs && node test/attachments.mjs",
+    "test": "node test/interop.mjs && node test/attachments.mjs && node test/v2.mjs",
     "test:e2e": "node build.mjs && node test/e2e-mock.mjs",
     "serve": "npx http-server dist -p 4040 --cors -c-1"
   },

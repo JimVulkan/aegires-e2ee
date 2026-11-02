@@ -11,7 +11,8 @@ import { storage } from "@vendetta/plugin";
 import { decryptBytes } from "../crypto/wire.ts";
 import { MAX_FILE_BYTES, extOf, imageDims, imageMimeFor, isEncryptedFileName, mimeFor, originalFileName, rawCdnUrl } from "../crypto/files.ts";
 import { base64Encode } from "../crypto/base64.ts";
-import { getReceiveKeys } from "../state.ts";
+import { decryptFile } from "../crypto/v2.ts";
+import { getReceiveKeys, getReceiveKeysV2 } from "../state.ts";
 import { readUri, removeCacheFiles, writeCacheFile } from "../native.ts";
 import { diag } from "../diag.ts";
 
@@ -68,13 +69,26 @@ function isEncAttachment(a: any): boolean {
   return !!a && typeof a === "object" && isEncryptedFileName(a.filename) && typeof (a.url ?? a.proxy_url) === "string" && !String(a.url).startsWith("file:") && !String(a.url).startsWith("data:");
 }
 
-async function decryptOne(a: any, keys: Uint8Array[], size: { w: number; h: number } | null): Promise<Decrypted> {
-  const blob = await readUri(rawCdnUrl(String(a.url ?? a.proxy_url)), MAX_FILE_BYTES + 64);
-  let plain: Uint8Array | null = null;
-  for (const k of keys) {
-    plain = decryptBytes(blob, k);
-    if (plain) break;
+interface Keys { v1: Uint8Array[]; v2: Uint8Array[]; channelId?: string; authorId?: string }
+
+/** v2 file (header 0x3N, bound to channel + author) first, then v1 (iv || gcm). */
+function openFile(blob: Uint8Array, k: Keys): Uint8Array | null {
+  if (blob.length && blob[0] >> 4 === 3 && k.channelId && k.authorId) {
+    for (const key of k.v2) {
+      const plain = decryptFile(blob, key, k.channelId, k.authorId);
+      if (plain) return plain;
+    }
   }
+  for (const key of k.v1) {
+    const plain = decryptBytes(blob, key);
+    if (plain) return plain;
+  }
+  return null;
+}
+
+async function decryptOne(a: any, keys: Keys, size: { w: number; h: number } | null): Promise<Decrypted> {
+  const blob = await readUri(rawCdnUrl(String(a.url ?? a.proxy_url)), MAX_FILE_BYTES + 64 * 1024);
+  const plain = openFile(blob, keys);
   if (!plain) throw new Error("wrong key or corrupted file");
   const name = originalFileName(String(a.filename));
   const mime = mimeFor(name);
@@ -93,7 +107,7 @@ async function decryptOne(a: any, keys: Uint8Array[], size: { w: number; h: numb
   return { uri, name, mime, size: plain.length, w: dims?.w, h: dims?.h };
 }
 
-export function handleAttachments(m: any, channelId: string | undefined, size: { w: number; h: number } | null): void {
+export function handleAttachments(m: any, channelId: string | undefined, size: { w: number; h: number } | null, authorId?: string): void {
   if (!storage.attachments) return;
   const pending: Array<Promise<void>> = [];
   for (const a of m.attachments) {
@@ -103,8 +117,8 @@ export function handleAttachments(m: any, channelId: string | undefined, size: {
     if (hit) { apply(a, hit, size); continue; }
     diag.attSeen++;
     if (failed.has(id) || queued.has(id)) continue;
-    const keys = getReceiveKeys(channelId);
-    if (!keys.length) continue;
+    const keys: Keys = { v1: getReceiveKeys(channelId), v2: getReceiveKeysV2(channelId), channelId, authorId };
+    if (!keys.v1.length && !keys.v2.length) continue;
     queued.add(id);
     const snapshot = { ...a };
     pending.push(enqueue(async () => {

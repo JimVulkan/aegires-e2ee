@@ -6,15 +6,21 @@ import { selectedChannelId } from "../patch.ts";
 import { storage } from "@vendetta/plugin";
 import { notify as showToast } from "../notify.ts";
 import {
+  PRESETS,
   clearGlobalKey,
+  getPreset,
   hasGlobalKey,
   listChannelConfigs,
   removeChannelConfig,
   setChannelEnabled,
   setChannelPassword,
   setGlobalPassword,
+  setPreset,
 } from "../state.ts";
-import { runSelfTest } from "../selftest.ts";
+import { maxPlaintextBytes } from "../crypto/v2.ts";
+import { FORCED_CHANNELS } from "../forced.ts";
+import { getSelfId } from "../self.ts";
+import { measureKdf, runSelfTest } from "../selftest.ts";
 import { diagLines } from "../diag.ts";
 
 const View = comp("View");
@@ -37,7 +43,7 @@ const Switch = comp("Switch") ?? FallbackSwitch;
 
 const C = { text: "#dbdee1", muted: "#949ba4", card: "#2b2d31", input: "#1e1f22", accent: "#5865f2", danger: "#da373c" };
 
-function Button(props: { label: string; onPress: () => void; danger?: boolean; busy?: boolean }) {
+function Button(props: { label: string; onPress: () => void; danger?: boolean; busy?: boolean; key?: any }) {
   return (
     <Touch
       disabled={props.busy}
@@ -99,6 +105,9 @@ function SettingsInner() {
   const [chanId, setChanId] = React.useState(currentChannelId());
   const [chanPw, setChanPw] = React.useState("");
   const [testLines, setTestLines] = React.useState([] as string[]);
+  const [pct, setPct] = React.useState(-1); // Argon2id progress, -1 = idle
+  const onProgress = (f: number) => setPct(Math.round(f * 100));
+  const busyLabel = (what: string) => what + (pct >= 0 ? ` ${pct}%` : "...");
 
   // Run a slow async action with a busy flag, and report failures instead of crashing.
   const run = async (what: string, fn: () => Promise<void>) => {
@@ -110,6 +119,7 @@ function SettingsInner() {
       showToast(what + " failed: " + String(e));
     } finally {
       setBusy(false);
+      setPct(-1);
       refresh();
     }
   };
@@ -118,22 +128,45 @@ function SettingsInner() {
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
       <Card
         title={"Global key " + (hasGlobalKey() ? "(set)" : "(not set)")}
-        hint="Used in every chat that has no channel key. Everyone in the chat must type the SAME password, and Aegires users must use the same one in the app. The password is not saved - only the key derived from it."
+        hint="Used in every chat that has no channel key. Everyone in the chat must type the SAME password (at least 8 characters), and Aegires users must use the same one in the app. The password is not saved - only the keys derived from it (v1 and v2). Deriving the v2 key (Argon2id, 64 MiB) can take a while on a phone."
       >
         <Field value={pw} onChange={setPw} placeholder="Shared password" secret />
         <Button
-          label={busy ? "Deriving key..." : "Set global key"}
+          label={busy ? busyLabel("Deriving key") : "Set global key"}
           busy={busy}
           onPress={() => {
             if (!pw) return showToast("Password cannot be empty");
             run("Set global key", async () => {
-              await setGlobalPassword(pw);
+              await setGlobalPassword(pw, onProgress);
               setPw("");
             });
           }}
         />
         {hasGlobalKey() ? <Button label="Clear global key" danger onPress={() => { clearGlobalKey(); showToast("Global key cleared"); refresh(); }} /> : null}
       </Card>
+
+      <Card
+        title={"Format: " + (storage.format === "v1" ? "v1 (legacy)" : "v2, " + getPreset().label)}
+        hint="v2 is the current Aegires format: Argon2id keys, a fresh key per message and per file bound to the chat and the sender. Old v1 messages are always still decrypted. Use v1 only to talk to old Aegires versions."
+      >
+        {PRESETS.map((p: any) => (
+          <Button
+            key={p.index}
+            label={(storage.format !== "v1" && getPreset().index === p.index ? "\u2714 " : "") + "v2 " + p.label + "  (max " + maxPlaintextBytes(p) + " bytes)"}
+            onPress={() => { storage.format = "v2"; setPreset(p.index); refresh(); }}
+          />
+        ))}
+        <Button label={(storage.format === "v1" ? "\u2714 " : "") + "v1 legacy (AES-256-GCM, PBKDF2)"} onPress={() => { storage.format = "v1"; refresh(); }} />
+        <ToggleRow label="Hide message length better (Padmé padding, up to ~12% longer; every v2 client can read it)" value={storage.padme !== false} onChange={(v) => { storage.padme = v; refresh(); }} />
+      </Card>
+
+      {Object.keys(FORCED_CHANNELS).length ? (
+        <Card title="Built-in channels" hint="Aegires channels with a built-in key: always encrypted with v2 AES-128-GCM, nothing to set up. Anyone with Aegires can read them.">
+          {Object.keys(FORCED_CHANNELS).map((id) => (
+            <Text key={id} selectable style={{ color: C.text, marginTop: 6, fontFamily: "monospace" }}>{id}</Text>
+          ))}
+        </Card>
+      ) : null}
 
       <Card title="Behaviour">
         <ToggleRow label="Encrypt outgoing messages by default (in chats without their own on/off setting)" value={!!storage.encryptByDefault} onChange={(v) => { storage.encryptByDefault = v; refresh(); }} />
@@ -151,7 +184,7 @@ function SettingsInner() {
           onPress={() => {
             if (!/^\d+$/.test(chanId)) return showToast("Channel ID must be digits only");
             run("Save chat settings", async () => {
-              if (chanPw) await setChannelPassword(chanId, chanPw);
+              if (chanPw) await setChannelPassword(chanId, chanPw, onProgress);
               setChannelEnabled(chanId, true);
               setChanPw("");
             });
@@ -169,7 +202,7 @@ function SettingsInner() {
       <Card title="Diagnostics" hint="What the hooks are doing right now. Press Refresh after sending / receiving a message.">
         <Button label="Refresh" onPress={() => refresh()} />
         <Text selectable style={{ color: C.text, marginTop: 8, fontFamily: "monospace", fontSize: 12 }}>
-          {"global key: " + (hasGlobalKey() ? "set" : "NOT SET") + "\n" + diagLines().join("\n")}
+          {"global key: " + (hasGlobalKey() ? "set" : "NOT SET") + "\nformat: " + (storage.format === "v1" ? "v1" : "v2 " + getPreset().label) + "\nown user id: " + (getSelfId() ? "known" : "NOT FOUND YET") + "\n" + diagLines().join("\n")}
         </Text>
       </Card>
 
@@ -182,6 +215,16 @@ function SettingsInner() {
               const r = await runSelfTest();
               setTestLines(r.lines);
               showToast(r.ok ? "Self-test passed" : "Self-test FAILED");
+            })
+          }
+        />
+        <Button
+          label={busy ? busyLabel("Measuring") : "Measure key derivation speed (real size)"}
+          busy={busy}
+          onPress={() =>
+            run("Measure", async () => {
+              const ms = await measureKdf(onProgress);
+              setTestLines([`Argon2id 64 MiB took ${(ms / 1000).toFixed(1)} s on this phone`]);
             })
           }
         />

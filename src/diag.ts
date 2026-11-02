@@ -9,6 +9,8 @@ export const diag = {
   decrypted: 0,
   noKey: 0,
   wrongKey: 0,
+  noAuthor: 0, // v2 message but its author id was unknown (the author is part of the key)
+  lastKdfMs: 0, // how long the last key derivation (PBKDF2 + Argon2id) took
   sendCalls: 0,
   lastSend: "(no send seen yet)",
   attSeen: 0, // encrypted attachments seen
@@ -30,6 +32,8 @@ export function diagLines(): string[] {
     `decrypted OK: ${diag.decrypted}`,
     `no key for channel: ${diag.noKey}`,
     `wrong key: ${diag.wrongKey}`,
+    `no author id (v2): ${diag.noAuthor}`,
+    `last key derivation: ${diag.lastKdfMs ? (diag.lastKdfMs / 1000).toFixed(1) + " s" : "never run"}`,
     `sendMessage calls: ${diag.sendCalls}`,
     `last send: ${diag.lastSend}`,
     `attachments seen/decrypted/failed: ${diag.attSeen}/${diag.attDecrypted}/${diag.attFailed}`,

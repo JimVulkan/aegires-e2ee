@@ -31,7 +31,34 @@ Hardest to easiest:
 3. **Send path.** One function to wrap, but must fail closed.
 4. **Crypto, storage, settings UI, command.** Standard code, tested.
 
-## Wire format (Aegires v1)
+## Wire format (Aegires v2, default for sending)
+
+```
+master = Argon2id(NFKC(password) UTF-8, salt "dcenc2|user-key|v1", t=3, m=64 MiB, p=1, 32 bytes)
+info   = "dcenc2/<msg|file>" | preset(1) | len16 | channelId | len16 | senderId
+text   = "§" + base64nopad( header | salt[16] | AES-GCM(padded) | tag )
+           header = 0x20 | preset   key||nonce = HKDF-SHA256(master, salt, info)   AAD = header|salt|info
+           presets: 0 AES-128 (12-byte tag, 16-byte pad blocks), 1 AES-192 (14, 32), 2 AES-256 (16, 64)
+           padded = text | 0x80 | zeros, a multiple of the pad block (we pad further with Padmé)
+file   = header 0x30 | preset, salt[16], then 64 KiB chunks, each AES-GCM'd with nonce = prefix|counter|last
+```
+
+Ciphertexts only open in the same channel and from the same author, so the receiver needs the
+author id of each message (remembered across partial `MESSAGE_UPDATE` events) and the sender
+needs its own user id (from `CONNECTION_OPEN`, or `UserStore`). Sending fails closed until it is known.
+
+Improvements over upstream `experimental-v2`, all still readable by any v2 decoder:
+
+- **Padmé padding** (`v2.ts`): pads to the Padmé bucket of the length (max ~12% overhead, never
+  past the Discord limit) instead of only to the 16/32/64-byte block, so the ciphertext length
+  leaks O(log log n) bits about the text instead of nearly all of it. Toggle in settings.
+- **Verify before decrypt, half the AES work** (`aead.ts`): short-tag GCM is checked by computing
+  the tag directly (GHASH over AAD and ciphertext, xor E(K, J0)) and only then CTR-decrypting.
+  Upstream decrypted first and then re-ran a full GCM encryption to recompute the tag.
+- **File decryption without per-chunk copies**: chunks are written into one preallocated buffer.
+- **Media**: attachments are encrypted/decrypted in the v2 file format; v1 files still open.
+
+## Wire format (Aegires v1, legacy)
 
 ```
 key   = PBKDF2-HMAC-SHA1(password UTF-8, salt "pwc", 15000 iterations, 32 bytes)
@@ -47,7 +74,9 @@ max plaintext: 1300 characters
 | File | What it does |
 |---|---|
 | `src/index.tsx` | Entry point. `onLoad` installs each patch in its own try/catch; `onUnload` removes them all |
-| `src/crypto/wire.ts` | `encryptText` / `decryptText` / `encryptBytes` / `decryptBytes` in the Aegires format |
+| `src/crypto/wire.ts` | v1 `encryptText` / `decryptText` / `encryptBytes` / `decryptBytes` |
+| `src/crypto/v2.ts`, `kdf2.ts`, `aead.ts` | v2 messages/files, Argon2id master key, short-tag AES-GCM |
+| `src/self.ts`, `src/forced.ts` | Own user id (v2 binds to it); Aegires built-in channel keys |
 | `src/crypto/keys.ts` | Password to key (PBKDF2), hex helpers |
 | `src/crypto/utf8.ts`, `base64.ts`, `random.ts` | Own UTF-8 and base64 codecs (Discord's runtime may lack `TextEncoder`/`atob`); secure random that **throws** rather than falling back to `Math.random` |
 | `src/crypto/files.ts` | Attachment naming, `[sz:W,H]`, CDN URL and MIME helpers |

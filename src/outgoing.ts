@@ -7,7 +7,10 @@ import { notify } from "./notify.ts";
 import { RN } from "./rt.ts";
 import { MAX_PLAINTEXT_LEN, encryptBytes, encryptText, looksEncrypted } from "./crypto/wire.ts";
 import { MAX_FILE_BYTES, encryptedFileName, extOf, imageMimeFor, makeSizeTag } from "./crypto/files.ts";
-import { getSendKey, isEncryptionOn } from "./state.ts";
+import { storage } from "@vendetta/plugin";
+import { encryptFile, encryptMessage, maxPlaintextBytes, utf8Length } from "./crypto/v2.ts";
+import { getSendFormat, getSendKey, getSendKeyV2, getSendPreset, isEncryptionOn } from "./state.ts";
+import { getSelfId } from "./self.ts";
 import { readUri, tempName, writeCacheFile } from "./native.ts";
 import { diag } from "./diag.ts";
 
@@ -22,16 +25,36 @@ export function prepare(channelId: string, content: unknown, force = false): str
   if (looksEncrypted(content)) return null; // already encrypted (e.g. our own re-send)
   if (!force && !isEncryptionOn(channelId)) return null;
 
-  const key = getSendKey(channelId);
-  if (!key) {
-    notify("E2EE is on for this chat but no key is set - message not sent");
-    return BLOCK;
-  }
-  if (content.length > MAX_PLAINTEXT_LEN) {
-    notify(`Too long to encrypt (${content.length}/${MAX_PLAINTEXT_LEN}) - message not sent`);
-    return BLOCK;
-  }
   try {
+    if (getSendFormat(channelId) === "v2") {
+      const key = getSendKeyV2(channelId);
+      if (!key) {
+        notify("E2EE is on for this chat but no v2 key is set (set the password again in the plugin settings) - message not sent");
+        return BLOCK;
+      }
+      const self = getSelfId();
+      if (!self) {
+        notify("Your Discord user id is not known yet, so the message cannot be encrypted - not sent. Try again in a moment.");
+        return BLOCK;
+      }
+      const preset = getSendPreset(channelId);
+      const max = maxPlaintextBytes(preset);
+      const len = utf8Length(content);
+      if (len > max) {
+        notify(`Too long to encrypt with ${preset.label} (${len}/${max} bytes) - message not sent`);
+        return BLOCK;
+      }
+      return encryptMessage(content, key, preset, channelId, self, { padme: storage.padme !== false });
+    }
+    const key = getSendKey(channelId);
+    if (!key) {
+      notify("E2EE is on for this chat but no key is set - message not sent");
+      return BLOCK;
+    }
+    if (content.length > MAX_PLAINTEXT_LEN) {
+      notify(`Too long to encrypt (${content.length}/${MAX_PLAINTEXT_LEN}) - message not sent`);
+      return BLOCK;
+    }
     return encryptText(content, key);
   } catch (e) {
     notify("Encryption failed - message not sent");
@@ -70,11 +93,13 @@ function setExisting(o: any, fields: Record<string, any>): void {
   }
 }
 
-/** Encrypts one upload in place; returns the image size for the caption tag, if any. */
 /** Encrypted temp file uri -> image size of the original (files encrypted when attached). */
 const sizes = new Map<string, { w: number; h: number } | null>();
 
-async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: number } | null> {
+type Seal = (plain: Uint8Array) => Uint8Array;
+
+/** Encrypts one upload in place; returns the image size for the caption tag, if any. */
+async function encryptUpload(u: any, seal: Seal): Promise<{ w: number; h: number } | null> {
   const d = descriptorOf(u);
   if (!d) throw new Error("unknown upload shape: " + Object.keys(u ?? {}).join(","));
   const name: string = d.filename ?? d.name ?? u.filename ?? "file";
@@ -85,7 +110,7 @@ async function encryptUpload(u: any, key: Uint8Array): Promise<{ w: number; h: n
   const bytes = await readUri(src, MAX_FILE_BYTES);
   const size = mime.startsWith("image/") || imageMimeFor(name) ? await imageSize(src) : null;
 
-  const enc = encryptBytes(bytes, key);
+  const enc = seal(bytes);
   const tmp = await writeCacheFile(tempName(extOf(name)), enc);
   const encName = encryptedFileName(name);
 
@@ -111,15 +136,29 @@ export function encryptAttachments(channelId: string, files: any[]): Promise<boo
  * false (the caller must then NOT send).
  */
 export async function encryptOutgoing(channelId: string, uploads: any[], captions: any[]): Promise<boolean> {
-  const key = getSendKey(channelId);
-  if (!key) {
-    notify("E2EE is on for this chat but no key is set - upload cancelled");
-    return false;
+  let seal: Seal;
+  if (getSendFormat(channelId) === "v2") {
+    // v2 file format: per-file HKDF key bound to (channel, sender), 64 KiB authenticated chunks.
+    const key = getSendKeyV2(channelId);
+    const self = getSelfId();
+    if (!key || !self) {
+      notify(key ? "Your Discord user id is not known yet - upload cancelled. Try again in a moment." : "E2EE is on for this chat but no v2 key is set - upload cancelled");
+      return false;
+    }
+    const preset = getSendPreset(channelId);
+    seal = (b) => encryptFile(b, key, preset, channelId, self);
+  } else {
+    const key = getSendKey(channelId);
+    if (!key) {
+      notify("E2EE is on for this chat but no key is set - upload cancelled");
+      return false;
+    }
+    seal = (b) => encryptBytes(b, key);
   }
   try {
     let tag = "";
     for (const u of uploads) {
-      const s = await encryptUpload(u, key);
+      const s = await encryptUpload(u, seal);
       if (s && !tag) tag = makeSizeTag(s.w, s.h);
     }
     for (const holder of captions) {

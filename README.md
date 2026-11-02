@@ -13,6 +13,8 @@ This plugin leverages the client-side encryption feature of [Aegires](https://gi
 ## Features
 
 - **Text message encryption and decryption** with a shared password
+- **Aegires v2 format**: Argon2id password keys, a fresh HKDF key per message and per file bound to the chat and the sender, AES-128 / 192 / 256-GCM presets. Old v1 messages are still decrypted, and v1 can still be chosen for sending
+- **Padmé length padding** for v2 messages, so ciphertext length says much less about the text length (still readable by every v2 client)
 - **Global key** used in every chat that has no key of its own
 - **Per-chat keys**: set a separate password for a specific channel, by channel ID
 - **Per-chat on/off switch** for outgoing encryption, so you choose where messages are encrypted
@@ -36,7 +38,7 @@ This plugin leverages the client-side encryption feature of [Aegires](https://gi
 | Diagnostics and self-test | Working |
 | Image encryption / decryption | Implemented, experimental |
 | Video and other file encryption | Implemented, experimental |
-| AES-256 | Coming soon (experimental) |
+| Aegires v2 (Argon2id, HKDF, AES-128/192/256) | Implemented, experimental |
 
 ## Compatibility
 
@@ -83,7 +85,6 @@ Please open an issue if you find something else. Turn on debug logging and inclu
 ## Roadmap
 
 - Confirm attachment support on more Discord versions
-- AES-256 as an experimental option
 
 ## Building from source
 

@@ -5,7 +5,8 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 const LOOKUP: Record<string, number> = {};
 for (let i = 0; i < ALPHABET.length; i++) LOOKUP[ALPHABET[i]] = i;
 
-export function base64Encode(bytes: Uint8Array): string {
+/** pad=false drops the trailing '=' (Android's Base64.NO_PADDING, used by Aegires v2 messages). */
+export function base64Encode(bytes: Uint8Array, pad = true): string {
   let out = "";
   for (let i = 0; i < bytes.length; i += 3) {
     const a = bytes[i];
@@ -13,8 +14,8 @@ export function base64Encode(bytes: Uint8Array): string {
     const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
     out += ALPHABET[a >> 2];
     out += ALPHABET[((a & 3) << 4) | (b >> 4)];
-    out += i + 1 < bytes.length ? ALPHABET[((b & 15) << 2) | (c >> 6)] : "=";
-    out += i + 2 < bytes.length ? ALPHABET[c & 63] : "=";
+    out += i + 1 < bytes.length ? ALPHABET[((b & 15) << 2) | (c >> 6)] : pad ? "=" : "";
+    out += i + 2 < bytes.length ? ALPHABET[c & 63] : pad ? "=" : "";
   }
   return out;
 }

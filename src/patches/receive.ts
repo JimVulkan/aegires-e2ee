@@ -11,7 +11,9 @@ import { before, findFlux, noteFound, selectedChannelId } from "../patch.ts";
 import { storage } from "@vendetta/plugin";
 import { decryptText, looksEncrypted } from "../crypto/wire.ts";
 import { splitSizeTag } from "../crypto/files.ts";
-import { LOCK, getReceiveKeys, isEncryptionOn } from "../state.ts";
+import { decryptMessage as decryptV2, messagePreset } from "../crypto/v2.ts";
+import { LOCK, getReceiveKeys, getReceiveKeysV2, isEncryptionOn } from "../state.ts";
+import { noteSelfId } from "../self.ts";
 import { notify } from "../notify.ts";
 import { retryUploadPatch, uploadHooked } from "./upload.ts";
 import { encryptAttachments } from "../outgoing.ts";
@@ -31,37 +33,67 @@ function remember(id: unknown): void {
   if (encryptedIds.size > 5000) encryptedIds.delete(encryptedIds.values().next().value as string);
 }
 
-function tryDecrypt(content: string, channelId: string | undefined): string | null {
-  for (const key of getReceiveKeys(channelId)) {
-    const plain = decryptText(content, key);
-    if (plain !== null) return plain;
+// v2 binds each ciphertext to (channel id, AUTHOR id). Partial MESSAGE_UPDATE events can omit
+// the author, so remember who wrote what from earlier events.
+const authorById = new Map<string, string>();
+
+function authorOf(m: any): string | undefined {
+  const id = m.author?.id;
+  if (id && m.id) {
+    authorById.set(String(m.id), String(id));
+    if (authorById.size > 5000) authorById.delete(authorById.keys().next().value as string);
   }
-  return null;
+  return id ? String(id) : m.id ? authorById.get(String(m.id)) : undefined;
+}
+
+type Outcome = { plain: string } | "nokey" | "noauthor" | "wrong";
+
+/** Tries v2 (when the header says so and the author is known), then v1. */
+function tryDecrypt(content: string, channelId: string | undefined, authorId: string | undefined): Outcome {
+  const v2keys = getReceiveKeysV2(channelId);
+  const v1keys = getReceiveKeys(channelId);
+  if (!v2keys.length && !v1keys.length) return "nokey";
+  const isV2 = !!messagePreset(content);
+  if (isV2 && channelId && authorId) {
+    for (const key of v2keys) {
+      const plain = decryptV2(content, key, channelId, authorId);
+      if (plain !== null) return { plain };
+    }
+  }
+  // A v1 ciphertext starts with a random IV, so it can look like a v2 header by chance.
+  for (const key of v1keys) {
+    const plain = decryptText(content, key);
+    if (plain !== null) return { plain };
+  }
+  return isV2 && v2keys.length && (!channelId || !authorId) ? "noauthor" : "wrong";
 }
 
 function decryptMessage(m: any, fallbackChannelId?: string): void {
   if (!m || typeof m !== "object") return;
   const channelId: string | undefined = m.channel_id ?? m.channelId ?? fallbackChannelId;
+  const authorId = authorOf(m);
   let size: { w: number; h: number } | null = null;
 
   if (looksEncrypted(m.content)) {
     diag.encSeen++;
-    const hasKeys = getReceiveKeys(channelId).length > 0;
-    const plain = hasKeys ? tryDecrypt(m.content, channelId) : null;
-    if (plain !== null) {
+    const r = tryDecrypt(m.content, channelId, authorId);
+    if (typeof r === "object") {
+      const plain = r.plain;
       diag.decrypted++;
       remember(m.id);
       // Aegires puts "[sz:W,H]" in front of image captions; hide it from the visible text.
       const sp = splitSizeTag(plain);
       if (sp.width && sp.height) size = { w: sp.width, h: sp.height };
       m.content = sp.text || sp.width === null ? (storage.showLock ? LOCK : "") + sp.text : "";
-    } else if (hasKeys) {
-      diag.wrongKey++;
-    } else {
+    } else if (r === "nokey") {
       diag.noKey++;
+    } else if (r === "noauthor") {
+      diag.noAuthor++;
+    } else {
+      diag.wrongKey++;
     }
   }
-  if (Array.isArray(m.attachments) && m.attachments.length) handleAttachments(m, channelId, size);
+  if (Array.isArray(m.attachments) && m.attachments.length) handleAttachments(m, channelId, size, authorId);
   // Reply previews ("replying to ...") carry their own copy of the original message.
   if (m.referenced_message) decryptMessage(m.referenced_message, channelId);
   // Forwarded messages carry snapshots of the original.
@@ -107,6 +139,8 @@ function interceptAttach(event: any, type: string): boolean {
 function handleEvent(event: any): boolean {
   diag.events++;
   if (!event || typeof event !== "object") return false;
+  // Learn our own user id (v2 binds what we send to it) from login / profile events.
+  if (event.type === "CONNECTION_OPEN" || event.type === "CURRENT_USER_UPDATE") noteSelfId(event.user?.id);
   if (interceptAttach(event, String(event.type))) return true;
   if (!event.message && !event.messages) return false;
   // Any event that carries message(s) is processed, whatever its name, so a renamed event
@@ -145,5 +179,6 @@ export function installReceivePatch(): () => void {
     redispatch = null;
     clearMedia();
     encryptedIds.clear();
+    authorById.clear();
   };
 }

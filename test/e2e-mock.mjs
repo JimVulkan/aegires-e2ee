@@ -13,6 +13,7 @@ import vm from "node:vm";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import * as ref from "./reference.mjs";
+import * as ref2 from "./reference2.mjs";
 
 const require = createRequire(import.meta.url);
 const code = fs.readFileSync(new URL("../dist/index.js", import.meta.url), "utf8");
@@ -93,6 +94,7 @@ const keyHex = key.toString("hex");
 
 // ---- outgoing -----------------------------------------------------------------------------
 storage.globalKeyHex = keyHex;
+storage.format = "v1";
 storage.encryptByDefault = true;
 await MessageActions.sendMessage("123", { content: "hello there" });
 assert.ok(sent.at(-1).content.startsWith("§"));
@@ -242,6 +244,55 @@ await tick();
 assert.equal(dispatched.length, nd + 1, "wrong key => no update dispatched");
 assert.equal(dispatched.at(-1).message.attachments[0].filename, "x.enc.png");
 console.log("  ok  receive: wrong-key attachment left untouched");
+
+// ---- v2 (Aegires dcenc2) --------------------------------------------------------------------
+const ME = "424242424242424242", FRIEND = "777777777777777777", CH2 = "321";
+const master = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 5 + 1) & 255));
+storage.keyV2 = master.toString("hex");
+storage.format = "v2";
+storage.preset = 1; // AES-192
+storage.channels[CH2] = { enabled: true };
+const nBefore = sent.length;
+await MessageActions.sendMessage(CH2, { content: "v2 before id known" });
+assert.equal(sent.length, nBefore, "own id unknown => v2 send blocked (fail closed)");
+FluxDispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ME } });
+await MessageActions.sendMessage(CH2, { content: "hello v2" });
+const w2 = sent.at(-1).content;
+assert.equal(ref2.decMsg(w2, master, CH2, ME), "hello v2", "reference v2 decoder reads our message");
+assert.throws(() => ref2.decMsg(w2, master, CH2, FRIEND), "bound to the sender");
+assert.equal(Buffer.from(w2.slice(1, 3) + "==", "base64")[0], 0x21, "v2 header, AES-192 preset");
+console.log("  ok  v2: text encrypted with AES-192, bound to channel + sender, readable by the reference");
+
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "200", channel_id: CH2, author: { id: FRIEND }, content: ref2.encMsg("from friend", master, ref2.PRESETS[0], CH2, FRIEND) } });
+assert.equal(dispatched.at(-1).message.content, "🔒 from friend");
+FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: { id: "200", channel_id: CH2, content: ref2.encMsg("edited by friend", master, ref2.PRESETS[2], CH2, FRIEND) } });
+assert.equal(dispatched.at(-1).message.content, "🔒 edited by friend", "author remembered for partial updates");
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "201", channel_id: CH2, author: { id: ME }, content: ref2.encMsg("spoofed", master, ref2.PRESETS[0], CH2, FRIEND) } });
+assert.ok(dispatched.at(-1).message.content.startsWith("§"), "message claiming another author does not open");
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "202", channel_id: CH2, author: { id: FRIEND }, content: ref.encrypt("old v1 still works", key) } });
+assert.equal(dispatched.at(-1).message.content, "🔒 old v1 still works");
+console.log("  ok  v2: incoming from other clients (all presets, partial updates), author binding enforced, v1 history still decrypts");
+
+const pic2 = { uri: "file:///pics/photo.png", filename: "photo.png", mimeType: "image/png" };
+await Upload.uploadLocalFiles({ channelId: CH2, uploads: [{ item: pic2 }], parsedMessage: { content: "v2 pic" } });
+const enc2 = files.get(pic2.uri.slice(7));
+assert.equal(enc2[0], 0x31, "v2 file header, AES-192");
+assert.deepEqual(ref2.decFile(enc2, master, CH2, ME), photo, "reference v2 decoder reads our file");
+assert.equal(ref2.decMsg(uploaded.at(-1).parsedMessage.content, master, CH2, ME), "[sz:640,480]v2 pic");
+console.log("  ok  v2: attachments use the chunked v2 file format bound to channel + sender");
+
+const big = Buffer.from(Array.from({ length: 150000 }, (_, i) => (i * 7) & 255));
+const url2 = "https://cdn.discordapp.com/attachments/321/900/clip.enc.mp4";
+remote.set(url2, ref2.encFile(big, master, ref2.PRESETS[2], CH2, FRIEND));
+FluxDispatcher.dispatch({ type: "MESSAGE_CREATE", message: { id: "203", channel_id: CH2, author: { id: FRIEND }, content: "", attachments: [{ id: "900", filename: "clip.enc.mp4", url: url2 }] } });
+await tick();
+const v2att = dispatched.at(-1).message.attachments[0];
+assert.equal(v2att.filename, "clip.mp4");
+assert.equal(v2att.content_type, "video/mp4");
+assert.deepEqual(files.get(v2att.url.slice(7)), big);
+console.log("  ok  v2: incoming multi-chunk file (150 KB video) decrypted and shown");
+delete storage.channels[CH2];
+storage.format = "v1";
 
 // ---- command ------------------------------------------------------------------------------
 await commands[0].execute([{ name: "action", value: "off" }], { channel: { id: "123" } });
